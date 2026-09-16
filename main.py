@@ -172,6 +172,7 @@ def build_agent(config: dict, llm=None, server_info: dict = None, verbose: bool 
     memory_config = config.get("memory") or {}
     tools_config = config.get("tools") or {}
     perf = config.get("performance") or {}
+    audio_config = (config.get("models") or {}).get("audio") or {}
 
     max_tokens = int(perf.get("max_output_tokens", 512) or 0)
 
@@ -189,6 +190,12 @@ def build_agent(config: dict, llm=None, server_info: dict = None, verbose: bool 
             timeout=int(llm_config["timeout"]),
             max_tokens=max_tokens,
         )
+
+    # PHASE B6：音频预处理参数（ffmpeg 只做转码，不是模型也不是工具）
+    extra_kwargs = dict(extra_agent_kwargs or {})
+    extra_kwargs.setdefault("audio_ffmpeg", str(audio_config.get("ffmpeg", "ffmpeg") or "ffmpeg"))
+    extra_kwargs.setdefault("audio_preprocess_timeout",
+                            int(audio_config.get("ffmpeg_timeout", 60) or 60))
 
     agent = Agent(
         llm=llm,
@@ -210,7 +217,7 @@ def build_agent(config: dict, llm=None, server_info: dict = None, verbose: bool 
         memory_max_ratio=float(perf.get("memory_max_ratio", 0.10)),
         system_prompt_max_tokens=int(perf.get("system_prompt_max_tokens", 300)),
         verbose=verbose,
-        **(extra_agent_kwargs or {})
+        **extra_kwargs
     )
     # 把探测信息挂到 agent 上，/status 与启动横幅直接用
     agent.server_info = server_info

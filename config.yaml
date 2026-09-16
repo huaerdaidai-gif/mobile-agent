@@ -100,17 +100,25 @@ models:
   primary:
     enabled: true
   vision:
-    enabled: false
-    name: ""
-    endpoint: ""
+    # Vision 专家：llama.cpp mmproj（手机上是 127.0.0.1:8081）
+    enabled: true
+    provider: openai-compatible
+    name: SmolVLM-256M-Instruct-Q8_0.gguf
+    endpoint: ${MOBILE_AGENT_VISION_BASE_URL:-http://127.0.0.1:8081/v1}
     timeout: 120
     max_output_tokens: 256
   audio:
-    enabled: false
-    name: ""
-    endpoint: ""
+    # Audio 专家（STT）：whisper.cpp 的 whisper-server（手机上是 127.0.0.1:8082）
+    # 语音附件 → ffmpeg 转 16k/mono/wav → /inference → transcript → Primary
+    enabled: true
+    provider: whisper
+    name: whisper-base
+    base_url: ${MOBILE_AGENT_STT_BASE_URL:-http://127.0.0.1:8082}
+    language: zh
+    prompt: 以下是简体中文普通话的转写。
     timeout: 120
-    max_output_tokens: 256
+    ffmpeg: ffmpeg
+    ffmpeg_timeout: 60
 
 # 调度器：当前 llama.cpp 只有 1 个 slot，模型并行默认关闭
 scheduler:

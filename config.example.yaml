@@ -85,11 +85,20 @@ models:
     timeout: 120
     max_output_tokens: 256
   audio:
+    # Audio 是「模型专家」（STT），接 whisper.cpp 的 whisper-server（端口 8082）
+    # 启用后：语音附件 → ffmpeg 转 16k/mono/wav → POST {base_url}/inference → transcript → Primary
     enabled: false
-    name: ""
-    endpoint: ""
+    # 默认 whisper（whisper.cpp）；接其它协议时填 openai-compatible 并补 name
+    provider: whisper
+    name: whisper-base
+    base_url: http://127.0.0.1:8082
+    language: zh
+    # 初始提示只用于偏置输出（例如简体中文），不做文本后处理
+    prompt: 以下是简体中文普通话的转写。
     timeout: 120
-    max_output_tokens: 256
+    # 音频预处理（ffmpeg 转码）用的二进制与超时；只做转码，不是模型
+    ffmpeg: ffmpeg
+    ffmpeg_timeout: 60
 
 # 轻量调度器：当前 llama.cpp 单 slot，模型并行默认关闭（并行只会排队）
 scheduler:

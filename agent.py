@@ -41,6 +41,7 @@ import os
 import time
 from typing import Callable, Dict, List, Optional
 
+from adapter.model import audio_preprocess
 from llm import LLM, LLMError
 from model.router import LightweightModelRouter
 from tool_parser import looks_like_tool_attempt, parse_legacy_tool_call, parse_tool_call
@@ -159,6 +160,14 @@ VISION_RESULT_MAX_CHARS = 400
 
 # 视觉结果注入当前轮时使用的前缀（只存在于本轮，不进 history / memory / system）
 VISUAL_CONTEXT_PREFIX = "图片理解结果："
+
+# ---- PHASE B6：Audio/STT 阶段（独立语音专家，不参与普通文字对话）----
+
+# 语音转写结果注入当前轮时使用的前缀（同样只存在于本轮）
+AUDIO_CONTEXT_PREFIX = "语音转写结果："
+
+# 转写文本进入 Primary 上下文前的长度上限（字符），防止长音频挤爆上下文
+AUDIO_TRANSCRIPT_MAX_CHARS = 1000
 
 
 def estimate_tokens(text: str) -> int:
@@ -283,6 +292,9 @@ class Agent:
         default_location: str = "",
         model_router=None,
         vision_provider=None,
+        audio_provider=None,
+        audio_ffmpeg: str = "ffmpeg",
+        audio_preprocess_timeout: int = 60,
     ):
         self.llm = llm
         self.max_context = int(max_context)
@@ -319,6 +331,11 @@ class Agent:
         self.model_router = model_router or LightweightModelRouter()
         # Vision 专家模型（独立 provider）。未注入时从 router 的 registry 取；都没有就是不可用。
         self.vision_provider = vision_provider
+        # Audio/STT 专家模型（独立 provider，whisper.cpp）。同样支持从 router 的 registry 取。
+        self.audio_provider = audio_provider
+        # 音频预处理（只做 ffmpeg 转码；不是模型、不是工具）
+        self.audio_ffmpeg = audio_ffmpeg or "ffmpeg"
+        self.audio_preprocess_timeout = int(audio_preprocess_timeout or 60)
         # 最近一次请求的路由结果（只用于观测/测试，不参与逻辑）
         self.last_route: Dict = {}
         # 最近一次请求的分级耗时（生产只打印 total/ttft/tool/model）
@@ -375,6 +392,7 @@ class Agent:
         timing = {"total_ms": 0, "gate_ms": 0, "route_ms": 0, "schema_ms": 0,
                   "model_ttft_ms": None, "model_generation_ms": 0, "tool_ms": 0,
                   "vision_ms": 0, "vision_calls": 0,
+                  "audio_ms": 0, "audio_calls": 0,
                   "first_chunk_ms": None, "model_calls": 0, "tool_calls": 0}
 
         gate_started = time.time()
@@ -413,6 +431,28 @@ class Agent:
                 if not route.degraded:
                     route_notes = ["（Vision model unavailable：%s。"
                                    "请如实告诉用户你现在无法读取这张图片，不要猜测或编造图片内容）"
+                                   % reason] + route_notes
+
+        # PHASE B6：Audio stage（只在确有音频附件时执行；顺序固定为 Vision → Audio → Primary）
+        if attachments.get("audios"):
+            self._status("[语音] 正在转写语音…")
+            audio_started = time.time()
+            transcript, audio_status = self._audio_stage(attachments.get("audios"))
+            timing["audio_ms"] = int((time.time() - audio_started) * 1000)
+            timing["audio_calls"] = int(audio_status.get("calls", 0))
+            timing["audio_state"] = audio_status.get("state", "")
+            if transcript:
+                # 只注入当前轮：转写结果不进 history / memory / system prompt
+                route_notes = ["（%s%s）" % (AUDIO_CONTEXT_PREFIX, transcript)] + route_notes
+                self._status("[语音] 转写完成（%d 字，%d ms）"
+                             % (audio_status.get("chars", 0), timing["audio_ms"]))
+            else:
+                reason = audio_status.get("reason") or "语音无法转写"
+                self._status("[语音] %s" % reason)
+                # 绝不假装听懂：明确告诉主模型「转写不可用」，由它如实回复用户。
+                if not route.degraded:
+                    route_notes = ["（Audio transcription unavailable：%s。"
+                                   "请如实告诉用户你无法听清这段语音，不要编造转写内容）"
                                    % reason] + route_notes
 
         schema_started = time.time()
@@ -830,6 +870,97 @@ class Agent:
         status["chars"] = len(text)
         status["model"] = getattr(info, "name", "") or ""
         return VISUAL_CONTEXT_PREFIX + text, status
+
+    # ---------------- Audio/STT stage（PHASE B6：语音专家） ----------------
+
+    def _resolve_audio_provider(self):
+        """取 STT Provider：显式注入的优先，其次问 model_router 的 registry，最后不可用。"""
+        if self.audio_provider is not None:
+            return self.audio_provider
+        registry_obj = getattr(self.model_router, "registry", None)
+        if registry_obj is None:
+            return None
+        try:
+            return registry_obj.get("audio")
+        except Exception:
+            return None
+
+    def _audio_stage(self, audios: List[str]) -> tuple:
+        """把音频交给 STT 专家，换回一段转写文本（≤1000 字）。
+
+        返回 (transcript 或 None, status)：
+        - 不可用（未配置 / supports_audio=False）：state="UNAVAILABLE"、calls=0，
+          **绝不发起任何请求、绝不编造转写**；
+        - 预处理失败（找不到文件 / ffmpeg 转码失败 / 下载失败）：state="ERROR"、
+          calls=0，**不会调用 STT**；
+        - STT 调用失败：state="ERROR"、calls=1，同样不编造内容；
+        - 成功：state="READY"、calls=1，返回截断后的转写文本。
+
+        音频预处理（ffmpeg）与 STT（HTTP）严格分离：
+        这里只负责按顺序编排，临时文件在任何分支都会被删除。
+        """
+        status = {"state": "UNAVAILABLE", "calls": 0, "reason": ""}
+        provider = self._resolve_audio_provider()
+        if provider is None:
+            status["reason"] = "语音转写不可用（未配置 STT provider）"
+            return None, status
+        try:
+            available = bool(provider.supports_audio())
+            info = provider.model_info()
+        except Exception as exc:
+            status["reason"] = "语音转写不可用（%s）" % _brief(exc, 80)
+            return None, status
+        if not available:
+            detail = getattr(info, "detail", "") or getattr(info, "state", "") or "未部署"
+            status["reason"] = "语音转写不可用（%s）" % _brief(detail, 100)
+            return None, status
+
+        source = ""
+        for item in audios or []:
+            if str(item or "").strip():
+                source = str(item).strip()
+                break
+        if not source:
+            status["state"] = "ERROR"
+            status["reason"] = "音频附件为空"
+            return None, status
+
+        prepared = None
+        try:
+            prepared = audio_preprocess.ensure_wav(
+                source, ffmpeg_bin=self.audio_ffmpeg, timeout=self.audio_preprocess_timeout)
+            if not prepared.ok:
+                status["state"] = "ERROR"
+                status["reason"] = "音频预处理失败：%s" % _brief(prepared.error, 100)
+                if prepared.detail:
+                    status["reason"] += "（%s）" % _brief(prepared.detail, 80)
+                return None, status
+            status["calls"] = 1        # 记「发起过 STT 调用」，失败也如实计入
+            try:
+                text = provider.transcribe(prepared.path)
+            except LLMError as exc:
+                status["state"] = "ERROR"
+                status["reason"] = "STT 调用失败：%s" % _brief(exc, 100)
+                return None, status
+            except Exception as exc:
+                status["state"] = "ERROR"
+                status["reason"] = "STT 调用异常：%s" % _brief(exc, 100)
+                return None, status
+        finally:
+            if prepared is not None:
+                prepared.cleanup()     # 正常/异常都删临时文件
+
+        text = (text or "").strip()
+        if not text:
+            status["state"] = "EMPTY"
+            status["reason"] = "STT 没有返回转写内容"
+            return None, status
+        if len(text) > AUDIO_TRANSCRIPT_MAX_CHARS:
+            text = text[:AUDIO_TRANSCRIPT_MAX_CHARS] + "…（已截断）"
+        status["state"] = "READY"
+        status["chars"] = len(text)
+        status["model"] = getattr(info, "name", "") or ""
+        return text, status
 
     def _parse_call(self, reply: str) -> Optional[Dict]:
         """解析模型输出：先严格解析，再按需做「全角标点归一化」，最后才试旧协议。

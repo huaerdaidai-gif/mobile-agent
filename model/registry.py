@@ -13,6 +13,7 @@ from typing import Dict, List
 
 from adapter.model.openai_compatible import OpenAICompatibleProvider
 from adapter.model.unavailable import UnavailableProvider
+from adapter.model.whisper import WhisperProvider
 from runtime import config as runtime_config
 from runtime import logging as agent_log
 
@@ -44,11 +45,29 @@ class ModelRegistry(object):
             max_output_tokens=settings["max_output_tokens"], role="primary", kind="text")
 
     def _build_optional(self, role: str, kind: str) -> None:
-        """vision/audio：只有配置明确 enabled + endpoint + name 才构造真实 Provider。"""
+        """vision/audio：只有配置明确 enabled + 端点 才构造真实 Provider。
+
+        - vision：OpenAI 兼容（llama.cpp 的 mmproj 多模态接口）；
+        - audio ：默认 whisper（whisper.cpp 的 whisper-server，STT 专用协议），
+          想接其它协议时用 `models.audio.provider` 覆盖（会退回 OpenAI 兼容分支）。
+        """
         section = (self.config.get("models") or {}).get(role) or {}
         enabled = bool(section.get("enabled", False))
-        endpoint = str(section.get("endpoint", "") or "")
+        endpoint = str(section.get("endpoint", "") or section.get("base_url", "") or "")
         name = str(section.get("name", "") or "")
+        provider_name = str(section.get("provider", "") or "").lower()
+
+        # Audio 是「模型专家」，不是工具：默认走 whisper-server 的 /inference
+        if role == "audio" and enabled and endpoint \
+                and provider_name in ("", "whisper", "whisper-server", "whisper.cpp"):
+            self.providers[role] = WhisperProvider(
+                base_url=endpoint, name=name or "whisper-base",
+                language=str(section.get("language", "zh") or ""),
+                timeout=int(section.get("timeout", 120) or 120),
+                initial_prompt=str(section.get("prompt", "") or ""))
+            agent_log.log("MODEL", "audio STT 已配置", endpoint=endpoint,
+                          language=section.get("language", "zh"))
+            return
         if enabled and endpoint and name:
             self.providers[role] = OpenAICompatibleProvider(
                 base_url=endpoint, name=name,
@@ -58,7 +77,8 @@ class ModelRegistry(object):
             agent_log.log("MODEL", "%s 模型已配置" % role, endpoint=endpoint, name=name)
             return
         reason = "未启用（config.models.%s.enabled=false）" % role if not enabled \
-            else "缺少 endpoint 或 name"
+            else ("缺少 endpoint（base_url）" if role == "audio" and not endpoint
+                  else "缺少 endpoint 或 name")
         self.providers[role] = UnavailableProvider(role=role, kind=kind,
                                                    endpoint=endpoint, reason=reason)
 
