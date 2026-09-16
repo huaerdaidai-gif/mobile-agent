@@ -5,7 +5,7 @@ Agent Core 只认识「文本进、文本出」，不认识 QQ、HTTP、Telegram
 """
 
 from dataclasses import dataclass, field
-from typing import Callable, Dict, Optional
+from typing import Callable, Dict, List, Optional
 
 
 @dataclass
@@ -18,6 +18,8 @@ class ChannelMessage:
     text: str = ""
     raw: Dict = field(default_factory=dict)
     reply_to: Dict = field(default_factory=dict)  # 回复目标（群/私聊 id 等）
+    # PHASE 2：附件（{"images": [...], "audios": [...]}），默认空字典，兼容旧的构造方式
+    attachments: Dict[str, List[str]] = field(default_factory=dict)
 
 
 class GatewayAdapter(object):

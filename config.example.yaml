@@ -1,20 +1,25 @@
-# Mobile Agent Portable MVP 示例配置
-# 用法：cp config.example.yaml config.yaml 然后按需修改（install-termux.sh 会自动复制）
-# 注意：本文件只保留两层结构，未安装 PyYAML 的 Termux 也能解析；
-#       敏感信息请用 ${环境变量}，不要写死在文件里。
+# Mobile Agent v0.26 示例配置
+# 用法：cp config.example.yaml config.yaml 然后按需修改
+#（Termux 安装脚本 install-termux.sh 会在缺少 config.yaml 时自动复制本文件）
+#
+# 注意：
+#   1) 敏感信息一律用 ${环境变量} 引用，不要写死在文件里；
+#   2) 支持多层结构（例如 models.primary.enabled），未安装 PyYAML 的 Termux 也能解析；
+#   3) 本文件只放公开安全的示例值，不要写入真实 token / 密钥 / 个人 IP。
 
 stream: true
 
 llm:
   # 模型服务地址：
   #   手机本机跑 llama-server → http://127.0.0.1:8080/v1
-  #   局域网另一台机器      → http://192.168.1.x:8080/v1
+  #   局域网另一台机器      → http://<你的主机>:8080/v1
   base_url: http://127.0.0.1:8080/v1
   model: qwen2.5-3b-instruct-q4_k_m.gguf
   temperature: 0.2
   timeout: 300
 
 agent:
+  # 上下文预算：真实值会与服务器 n_ctx 取较小值（见 performance.auto_detect_context）
   max_context: 4096
   max_steps: 4
   max_memory_entries: 50
@@ -26,21 +31,75 @@ memory:
   path: ""
 
 tools:
+  # 总开关与工具协议兼容开关（v0.25.1 行为保持不变）
   enabled: true
   legacy_protocol: false
   normalize_punctuation: true
   flat_arguments: true
+  # v0.26 工具分组：按需把对应组的 schema 贴到当前 user 消息（不进 system prefix）
+  core:
+    enabled: true          # time
+  system:
+    enabled: true          # file / shell
+  web:
+    enabled: true          # weather / web_search / web_fetch
+    default_location: ""   # 天气默认城市，留空则要求模型给出城市名
+  writing:
+    enabled: true          # document_write（保存文稿，不额外调用模型）
+  vision:
+    enabled: false         # 图片元信息/下载；理解图片需要视觉模型（默认无 → UNAVAILABLE）
+  audio:
+    enabled: false         # STT/TTS；未部署音频模型 → UNAVAILABLE
+  music:
+    enabled: false         # 无可靠音乐 Provider → UNAVAILABLE
 
 performance:
+  # 启动时探测服务器真实上下文：实际预算 = min(agent.max_context, 服务器 n_ctx)
   auto_detect_context: true
+  # 工具结果长度限制（字符）
   tool_result_max_chars: 1000
-  memory_max_items: 5
+  # Web 工具长度/超时硬限制（网页内容视为不可信数据）
+  web_result_max_chars: 1500
+  web_fetch_max_chars: 2500
+  web_search_max_items: 5
+  web_timeout: 10
+  # 记忆回灌条数（memory.max_items 为存储上限，这里是回灌上限）
+  memory_max_items: 3
   memory_max_ratio: 0.10
+  # system prompt 目标上限（仅告警，不阻断）
   system_prompt_max_tokens: 300
-  max_output_tokens: 512
+  # 单次生成上限
+  max_output_tokens: 256
+  # 闲聊误触发工具时，忽略并改用无工具提示词重答一次
   chat_tool_gate: true
 
-# 模型提供方（留空则沿用上面的 llm.*）
+# 多模型角色：primary 常驻；vision/audio 未部署时保持 UNAVAILABLE（不会伪装可用）
+models:
+  primary:
+    enabled: true
+  vision:
+    # 启用条件：enabled + name + endpoint 都填好，且服务器 /props.modalities.vision=true
+    enabled: false
+    name: ""
+    endpoint: ""
+    timeout: 120
+    max_output_tokens: 256
+  audio:
+    enabled: false
+    name: ""
+    endpoint: ""
+    timeout: 120
+    max_output_tokens: 256
+
+# 轻量调度器：当前 llama.cpp 单 slot，模型并行默认关闭（并行只会排队）
+scheduler:
+  max_parallel_tasks: 2
+  max_active_models: 1
+  parallel_models: false
+  model_timeout: 300
+  tool_timeout: 15
+
+# 模型提供方（base_url / name 留空则沿用上面的 llm.*）
 model:
   provider: openai-compatible
   base_url: ""
@@ -63,19 +122,26 @@ qq:
   adapter: onebot
   api_base: http://127.0.0.1:3000
   token: ${MOBILE_AGENT_QQ_TOKEN}
+  # 事件推送（OneBot → 网关）时要求的 token；留空表示只信任本机
+  push_token: ""
   self_id: ""
+  # 群里是否需要 @ 机器人才回应
   require_at: true
   reply_group: true
   at_sender: false
   max_chars: 1200
+  # 允许使用的 QQ 号白名单（逗号分隔，留空表示不限制）
   allow_users: ""
 
+# Host：auto 会在 Termux 上自动使用 TermuxHost
 host:
   profile: auto
 
+# 扩展与高风险接口（默认关闭）
 extension:
   admin_enabled: false
 
+# 日志：level + 输出文件（留空表示只输出到 stdout）
 logging:
   level: INFO
   file: ""

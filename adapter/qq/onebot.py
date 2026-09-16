@@ -18,6 +18,10 @@ import urllib.request
 from gateway.base import ChannelMessage, GatewayAdapter
 from runtime import logging as agent_log
 
+# 纯图片消息（没有文字）时补的固定问句：让 Agent 有事可做，而不是把消息丢掉。
+# 只在「没有有效文字 + 至少有一个有效图片」时使用，不影响任何文字消息。
+DEFAULT_IMAGE_TEXT = "请描述这张图片。"
+
 
 class QQBotAdapter(GatewayAdapter):
     """OneBot v11 适配器。"""
@@ -53,6 +57,7 @@ class QQBotAdapter(GatewayAdapter):
             return None
 
         text, mentioned = self._extract_text(payload.get("message"), payload.get("raw_message", ""))
+        images = self._extract_images(payload.get("message"))
         message_type = str(payload.get("message_type", "private"))
         if message_type == "group":
             if not self.reply_group:
@@ -67,9 +72,12 @@ class QQBotAdapter(GatewayAdapter):
 
         text = text.strip()
         if not text:
-            return None
+            if not images:
+                return None           # 既没有文字也没有可用图片：仍然丢弃
+            text = DEFAULT_IMAGE_TEXT  # 纯图片消息：补固定问句后继续走同一条链路
         return ChannelMessage(channel="qq", session_id=session_id, user_id=user_id,
-                              text=text, raw=payload, reply_to=reply_to)
+                              text=text, raw=payload, reply_to=reply_to,
+                              attachments={"images": images} if images else {})
 
     def _extract_text(self, message, raw_message: str):
         """从 OneBot 消息段里取纯文本，并判断有没有 @ 到机器人。"""
@@ -91,6 +99,26 @@ class QQBotAdapter(GatewayAdapter):
                     parts.append(" ")  # 别人的 @ 当成空白
         return "".join(parts), mentioned
 
+    @staticmethod
+    def _extract_images(message) -> list:
+        """从 OneBot 消息段里收集图片引用：data.url 优先，data.file 兜底，空值跳过。
+
+        - 只读 image 段，保持原顺序，不去重、不截断（多图策略由 Agent 决定）；
+        - 不猜路径、不下载、不转换、不访问文件系统，原样把 url / file 交给 Agent。
+        """
+        if not isinstance(message, list):
+            return []          # 老格式（整条是文本 / CQ 字符串）里不解析图片
+        images = []
+        for segment in message:
+            if not isinstance(segment, dict) or segment.get("type") != "image":
+                continue
+            data = segment.get("data") or {}
+            source = str(data.get("url", "") or "").strip() \
+                or str(data.get("file", "") or "").strip()
+            if source:
+                images.append(source)
+        return images
+
     # ---------------- 主流程 ----------------
 
     def handle(self, payload: dict, service, on_text=None):
@@ -107,7 +135,9 @@ class QQBotAdapter(GatewayAdapter):
             if on_text:
                 on_text(chunk)
 
-        reply = service.ask(message.text, session_id=message.session_id, on_text=collect)
+        # attachments 原样透传（图片由 Agent 的 Vision 链路处理，QQ 侧不做任何理解）
+        reply = service.ask(message.text, session_id=message.session_id, on_text=collect,
+                            attachments=message.attachments)
         if not reply:
             return None
         self.send_reply(message, reply)

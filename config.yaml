@@ -7,7 +7,8 @@ stream: true
 
 llm:
   # llama.cpp server 的 OpenAI 兼容接口地址
-  base_url: http://127.0.0.1:8080/v1
+  # 真实地址一律走环境变量（可用 MODEL_BASE_URL 覆盖），仓库里只保留本机示例值
+  base_url: ${MODEL_BASE_URL:-http://127.0.0.1:8080/v1}
   # 模型名称，llama.cpp 通常会忽略该字段，但部分版本会做校验，填启动时加载的模型即可
   model: qwen2.5-3b-instruct-q4_k_m.gguf
   # 采样温度：小模型做工具调用时建议低一些，输出更稳定

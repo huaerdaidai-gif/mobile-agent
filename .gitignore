@@ -18,3 +18,9 @@ dist/
 *.gguf
 *.bin
 memory/memory.json
+# 运行时产物（PID / 日志 / 状态）
+runtime/state/
+# 本地备份文件（例如 config.yaml.bak.20260916-072929）
+*.bak*
+# 本地临时产物（早期真机测试留下的记录文件）
+小米12.txt

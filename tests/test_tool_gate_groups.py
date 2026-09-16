@@ -98,10 +98,15 @@ class GateGroupsTest(unittest.TestCase):
         self.assertIn("北京天气怎么样", messages[-1]["content"])
 
     def test_plain_chat_has_no_schema_tokens(self):
+        """普通聊天不发送任何工具 schema，只带一句「本轮没有工具」的短提示。"""
+        from agent import NO_TOOL_NOTE
         agent = make_agent([], self.tmpdir)
         agent.history.append({"role": "user", "content": "你好"})
         messages = agent._build_messages_v2([])
-        self.assertEqual(messages[-1]["content"], "你好")
+        self.assertIn("你好", messages[-1]["content"])
+        self.assertIn(NO_TOOL_NOTE, messages[-1]["content"])
+        for entry in registry.list_tools():
+            self.assertNotIn("- %s：" % entry["name"], messages[-1]["content"])
 
     def test_history_is_not_polluted_by_schema(self):
         agent = make_agent(["你好呀"], self.tmpdir)
@@ -164,6 +169,25 @@ class GateGroupsTest(unittest.TestCase):
         result = agent._run_tool({"name": "image_analyze", "arguments": {}})
         self.assertFalse(result["ok"])
         self.assertIn("UNAVAILABLE", result["error"])
+
+    def test_stubborn_tool_calls_still_end_with_text_answer(self):
+        """闲聊时模型反复要求工具：最后一轮必须强制输出文本，而不是失败提示。"""
+        # 前 4 轮都被模型要求调用工具（第 4 轮是最后一轮 → 强制文本）
+        replies = ['{"type":"tool_call","name":"time","arguments":{}}'] * 4
+        replies.append("好的，我直接回答你。")
+        agent = make_agent(replies, self.tmpdir)
+        answer = agent.ask("帮我看看这段代码")
+        self.assertNotIn("已达到最大工具调用轮数", answer)
+        self.assertEqual(answer, "好的，我直接回答你。")
+
+    def test_no_tool_note_present_for_plain_chat(self):
+        from agent import NO_TOOL_NOTE
+        agent = make_agent([], self.tmpdir)
+        agent.history.append({"role": "user", "content": "你好"})
+        messages = agent._build_messages_v2([])
+        self.assertIn(NO_TOOL_NOTE, messages[-1]["content"])
+        # system 前缀不受影响（仍然是固定的那一份）
+        self.assertEqual(messages[0]["content"], agent.system_prompt)
 
 
 if __name__ == "__main__":

@@ -23,11 +23,13 @@ class Session(object):
         self.last_used = self.created_at
         self.turns = 0
 
-    def ask(self, text: str, on_text: Optional[Callable[[str], None]] = None) -> str:
+    def ask(self, text: str, on_text: Optional[Callable[[str], None]] = None,
+            attachments: Optional[Dict] = None) -> str:
+        """处理一次提问。attachments 只透传给 Agent，不写入会话状态。"""
         with self.lock:
             self.last_used = time.time()
             self.turns += 1
-            return self.agent.ask(text, on_text=on_text)
+            return self.agent.ask(text, on_text=on_text, attachments=attachments)
 
 
 class SessionManager(object):
@@ -53,8 +55,8 @@ class SessionManager(object):
                               total=len(self._sessions))
             return session
 
-    def ask(self, session_id: str, text: str, on_text=None) -> str:
-        return self.get(session_id).ask(text, on_text=on_text)
+    def ask(self, session_id: str, text: str, on_text=None, attachments=None) -> str:
+        return self.get(session_id).ask(text, on_text=on_text, attachments=attachments)
 
     def drop(self, session_id: str) -> bool:
         with self._lock:

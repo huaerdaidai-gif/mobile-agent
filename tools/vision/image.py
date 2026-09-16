@@ -87,7 +87,12 @@ def image_prepare(path_or_url: str) -> dict:
 
 
 def image_analyze(path_or_url: str = None, question: str = None) -> dict:
-    """图片理解：必须由 Vision 模型完成；当前没有视觉模型。"""
+    """图片理解：必须由 Vision 模型完成；当前没有视觉模型。
+
+    注意（v0.27 边界）：图片理解已经由 Agent 的 Vision stage 直接承担
+    （model/router.py 判定 VISION → agent._vision_stage 调视觉 provider）。
+    本工具刻意**不**再触发一次视觉推理，避免同一张图被推理两遍。
+    """
     return {"ok": False, "error": "vision_unavailable: 当前未部署视觉模型（llama.cpp /props "
                                   "modalities.vision=false），无法理解图片内容"}
 

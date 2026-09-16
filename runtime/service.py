@@ -95,10 +95,11 @@ class AgentService(object):
                                         "default_location": default_location,
                                     })
 
-    def ask(self, text: str, session_id: str = "default", on_text=None) -> str:
-        """处理一句话，返回回复文本。"""
+    def ask(self, text: str, session_id: str = "default", on_text=None,
+            attachments: dict = None) -> str:
+        """处理一句话，返回回复文本。attachments（图片/音频）只透传给 Agent。"""
         session = self.sessions.get(session_id)
-        reply = session.ask(text, on_text=on_text)
+        reply = session.ask(text, on_text=on_text, attachments=attachments)
         timing = getattr(session.agent, "last_timing", None) or {}
         if timing:
             # 生产日志只保留 4 个数字；详细 timing 只在 DEBUG 打
