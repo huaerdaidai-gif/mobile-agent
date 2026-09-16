@@ -1,0 +1,121 @@
+# Mobile Agent 配置文件（v0.25.1）
+# 说明：只需修改这里就能切换模型或调整 Agent 行为，不用改代码。
+
+# 是否使用流式输出（模型生成多少就显示多少）
+# 关闭后：一次性拿到完整回答再显示，适合调试或网络不稳的情况
+stream: true
+
+llm:
+  # llama.cpp server 的 OpenAI 兼容接口地址
+  base_url: http://127.0.0.1:8080/v1
+  # 模型名称，llama.cpp 通常会忽略该字段，但部分版本会做校验，填启动时加载的模型即可
+  model: qwen2.5-3b-instruct-q4_k_m.gguf
+  # 采样温度：小模型做工具调用时建议低一些，输出更稳定
+  temperature: 0.2
+  # 单次请求超时时间（秒）。手机端推理较慢，不要设置太小；流式模式下表示分片等待上限。
+  # 真机实测：2048 上下文 + 大工具结果时，一次请求可能超过 120s，故默认放宽到 300
+  timeout: 300
+
+agent:
+  # 上下文窗口预算（近似 token 数），与 llama.cpp 的 --ctx-size 保持一致
+  max_context: 4096
+  # 单次提问最多允许几轮工具调用，防止小模型陷入死循环
+  max_steps: 4
+  # 保存到 memory/memory.json 的历史条数上限（存储上限，不是回灌条数）
+  max_memory_entries: 50
+
+memory:
+  # 启动时是否把最近的记忆回灌进 system prompt
+  enabled: true
+  # 回灌最近多少条记忆（越少越省上下文）
+  max_items: 10
+  # 记忆文件路径，留空用默认的 memory/memory.json
+  path: ""
+
+tools:
+  # 是否允许 Agent 调用工具（关闭后只做纯对话，提示词里也不再出现工具说明）
+  enabled: true
+  # 是否额外兼容 v0.2 的旧协议（{"tool": "shell", "command": "ls"}）
+  # v0.25 默认只接受统一协议；如果你在用旧提示词/旧模型行为，可以临时设为 true
+  legacy_protocol: false
+  # 小模型（尤其 Qwen2.5-3B）常把 JSON 里的标点写成全角，
+  # 例如 {"type":"tool_call","name":"time","arguments：{}}
+  # 打开后会自动把全角标点归一化成半角再解析（只改标点，不猜字段）
+  normalize_punctuation: true
+  # Qwen2.5-3B 有相当比例的输出会把参数写在顶层：
+  #   {"type":"tool_call","name":"file","action":"read","path":"."}
+  # 打开后这种写法等价于 arguments={"action":"read","path":"."}（参数仍要过注册表校验）
+  flat_arguments: true
+
+# v0.25.1 性能与精度相关（速度优先）
+performance:
+  # 启动时通过 GET /v1/models、GET /props 探测服务器真实上下文；
+  # 实际预算 = min(agent.max_context, 服务器上下文)。探测失败则沿用配置值。
+  auto_detect_context: true
+  # 单条工具结果最多保留多少字符，超出会截断并加 [工具结果过长，已截断]
+  tool_result_max_chars: 4000
+  # 回灌进 system prompt 的记忆条数上限（等价于 memory.max_items，这里优先级更高）
+  memory_max_items: 5
+  # 记忆块最多占实际上下文的比例（0.10 = 10%）
+  memory_max_ratio: 0.10
+  # system prompt 的 token 目标上限（只用于提示，超过会在启动时告警）
+  system_prompt_max_tokens: 300
+  # 模型单次最多生成多少 token（控制生成长度，直接影响响应时间）
+  max_output_tokens: 512
+  # 聊天工具门控：闲聊/知识问答里模型误发出的工具调用不执行，
+  # 改为去掉工具说明重新回答一次（真机实测能把「闲聊误触发工具」降到 0）
+  chat_tool_gate: true
+
+# ============================================================
+# 以下为 Portable Agent MVP 新增段（保持两层结构，Termux 无 PyYAML 也能解析）
+# 敏感信息请用 ${环境变量} 引用，不要写死在文件里
+# ============================================================
+
+# 模型提供方（留空则沿用上面的 llm.* 配置）
+model:
+  provider: openai-compatible
+  base_url: ""
+  name: ""
+
+# 网关：外部请求（HTTP / QQ）的统一入口
+gateway:
+  host: 127.0.0.1
+  port: 8787
+  # none：不做认证（只在监听 127.0.0.1 时使用）；token：需要 Bearer Token
+  auth: none
+  token: ${MOBILE_AGENT_GATEWAY_TOKEN}
+  max_sessions: 16
+  idle_seconds: 3600
+
+# QQ Bot（OneBot v11 HTTP，兼容 NapCat / Lagrange / LLOneBot）
+qq:
+  enabled: false
+  adapter: onebot
+  # OneBot 实现的 HTTP API 地址（NapCat 默认 3000）
+  api_base: http://127.0.0.1:3000
+  # OneBot 的 access_token，建议用环境变量
+  token: ${MOBILE_AGENT_QQ_TOKEN}
+  # 机器人自己的 QQ 号（用于识别 @ 与忽略自己发的消息，可留空）
+  self_id: ""
+  # 群里是否需要 @ 机器人才回应
+  require_at: true
+  reply_group: true
+  # 回复时是否 @ 提问的人
+  at_sender: false
+  # 单条 QQ 消息最大字符数，超出自动分片
+  max_chars: 1200
+  # 允许使用的 QQ 号白名单（逗号分隔，留空表示不限制）
+  allow_users: ""
+
+# Host：auto 会在 Termux 上自动使用 TermuxHost
+host:
+  profile: auto
+
+# 扩展与高风险接口（默认关闭）
+extension:
+  admin_enabled: false
+
+# 日志：level + 输出文件（留空表示只输出到 stdout）
+logging:
+  level: INFO
+  file: ""

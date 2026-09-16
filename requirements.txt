@@ -1,0 +1,12 @@
+# Mobile Agent v0.1 依赖（全部轻量，无框架、无数据库）
+#
+# 注意：requests 与 PyYAML 都是「可选」依赖。
+# 代码在两者缺失时会自动回退到标准库（urllib + 内置极简 YAML 解析），
+# 所以在 Termux 上只 pkg install python 后直接运行也是可以的。
+#
+# 安装（可选）：
+#   pip install -r requirements.txt
+#   Termux: pip install requests pyyaml
+
+requests>=2.25.0
+PyYAML>=5.4
