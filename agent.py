@@ -367,6 +367,8 @@ class Agent:
         schema_started = time.time()
         registry.schema_text(tool_groups)   # 预热 schema 缓存（首次才真的构建）
         timing["schema_ms"] = int((time.time() - schema_started) * 1000)
+        self._pending_timing = timing
+        self._pending_started = request_started
 
         try:
             for _step in range(1, self.max_steps + 1):
@@ -420,7 +422,10 @@ class Agent:
                 self.history.append({"role": "assistant", "content": reply})
                 name = tool_call["name"]
                 self._status("[调用工具: %s]" % (name or "未知"))
+                tool_started = time.time()
                 result = self._run_tool(tool_call)
+                timing["tool_ms"] += int((time.time() - tool_started) * 1000)
+                timing["tool_calls"] += 1
                 if not result.get("ok"):
                     self._status("[工具失败: %s] %s" % (name, _brief(result.get("error") or result, 60)))
                 self.history.append({
@@ -592,7 +597,9 @@ class Agent:
             self.history = self.history[-HISTORY_HARD_LIMIT:]
 
     def _generate(self, on_text: Optional[Callable[[str], None]] = None,
-                  force_json: bool = False, no_tools: bool = False):
+                  force_json: bool = False, no_tools: bool = False,
+                  tool_groups: List[str] = None, notes: List[str] = None,
+                  timing: Dict = None):
         """生成一轮模型输出。
 
         返回 (文本, 显示闸门, 是否中途断开)。
@@ -603,7 +610,16 @@ class Agent:
         中途断开时：已经有内容就保留已有内容（不让用户白等），一个字都没有则抛 LLMError。
         """
         gate = _StreamGate(on_text)
-        messages = self._build_messages(no_tools=no_tools)
+        messages = self._build_messages_v2(tool_groups, no_tools=no_tools, notes=notes)
+        # 首字延迟（TTFT）与生成耗时（Stage 2 timing，生产只打印 total/ttft/tool/model）
+        call_started = time.time()
+        first_delta = [None]
+
+        def _mark_first():
+            if first_delta[0] is None:
+                first_delta[0] = int((time.time() - call_started) * 1000)
+                if timing is not None and timing.get("model_ttft_ms") is None:
+                    timing["model_ttft_ms"] = first_delta[0]
         # 重试路径用 JSON 约束解码（llama.cpp 的 response_format），保证重试一定拿到合法 JSON
         form = {"type": "json_object"} if force_json else None
 
@@ -614,12 +630,18 @@ class Agent:
                 if form is None:
                     raise
                 reply = self.llm.chat(messages)  # 服务端不支持时降级
+            _mark_first()
+            if timing is not None:
+                timing["model_calls"] = timing.get("model_calls", 0) + 1
+                timing["model_generation_ms"] += int((time.time() - call_started) * 1000)
             gate.feed(reply)
             return reply, gate, False
 
         chunks: List[str] = []
         try:
             for delta in self._stream_with_fallback(messages, form):
+                if not chunks:  # 第一个增量到达 = 首 token
+                    _mark_first()
                 chunks.append(delta)
                 gate.feed(delta)
         except LLMError:
@@ -630,7 +652,12 @@ class Agent:
                 return reply, gate, True  # 交给 ask() 判断为「不完整的工具调用」
             gate.flush()
             self._status("[流式响应中断，以上为已生成的部分]")
+            if timing is not None:
+                timing["model_calls"] = timing.get("model_calls", 0) + 1
             return reply, gate, True
+        if timing is not None:
+            timing["model_calls"] = timing.get("model_calls", 0) + 1
+            timing["model_generation_ms"] += int((time.time() - call_started) * 1000)
         return "".join(chunks), gate, False
 
     def _stream_with_fallback(self, messages, form):
@@ -743,7 +770,20 @@ class Agent:
         if save:
             self._save_memory(question, answer)
         self._trim_history()
+        self._finalize_timing()
         return answer
+
+    def _finalize_timing(self) -> None:
+        """把本轮分级耗时固化到 self.last_timing（由上层决定怎么打日志）。"""
+        timing = getattr(self, "_pending_timing", None)
+        started = getattr(self, "_pending_started", None)
+        if not timing or started is None:
+            return
+        timing["total_ms"] = int((time.time() - started) * 1000)
+        timing["first_chunk_ms"] = timing.get("model_ttft_ms")
+        self.last_timing = dict(timing)
+        self._pending_timing = None
+        self._pending_started = None
 
     def _load_memory(self) -> Dict:
         """读取记忆文件。
