@@ -26,7 +26,7 @@ except ImportError:  # pragma: no cover - 仅在包被裁剪时触发
         return False
 
 # 版本号（启动横幅与 /status 共用）
-VERSION = "0.25.1"
+VERSION = "0.26"
 
 # 项目根目录（以本文件所在目录为准，任何 cwd 下都能正确加载配置）
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
