@@ -36,7 +36,14 @@ class HealthTest(unittest.TestCase):
         self.assertTrue(payload["components"]["model"]["ok"])
         self.assertTrue(payload["components"]["qq"]["ok"])
         self.assertTrue(payload["components"]["host"]["ok"])
-        self.assertEqual(payload["components"]["capability"]["count"], 3)
+        # Stage 3：三项独立探测由调度器并行执行，并给出每项耗时
+        self.assertIn("probe_ms", payload)
+        self.assertIn("model", payload["probe_ms"])
+        # Stage 2：可用工具数量由分组开关决定（core/system/web/writing 默认启用）
+        from tools import registry
+        self.assertEqual(payload["components"]["capability"]["count"],
+                         len(registry.tool_names()))
+        self.assertGreaterEqual(payload["components"]["capability"]["count"], 3)
 
     def test_health_reports_model_failure(self):
         service = self.service_for("http://127.0.0.1:9/v1")

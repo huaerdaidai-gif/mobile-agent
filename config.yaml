@@ -46,6 +46,22 @@ tools:
   #   {"type":"tool_call","name":"file","action":"read","path":"."}
   # 打开后这种写法等价于 arguments={"action":"read","path":"."}（参数仍要过注册表校验）
   flat_arguments: true
+  # Stage 2：工具分组开关（按需把 schema 贴在当前 user 消息里，不进 system prefix）
+  core:
+    enabled: true          # time
+  system:
+    enabled: true          # file / shell
+  web:
+    enabled: true          # weather / web_search / web_fetch
+    default_location: ""   # 天气默认城市，留空则要求模型给出城市名
+  writing:
+    enabled: true          # document_write（保存文稿，不额外调用模型）
+  vision:
+    enabled: false         # 图片元信息/下载（需要时打开）；理解图片需要视觉模型
+  audio:
+    enabled: false         # STT/TTS：未部署音频模型 → UNAVAILABLE
+  music:
+    enabled: false         # 无可靠音乐 Provider → UNAVAILABLE
 
 # v0.25.1 性能与精度相关（速度优先）
 performance:
@@ -53,18 +69,55 @@ performance:
   # 实际预算 = min(agent.max_context, 服务器上下文)。探测失败则沿用配置值。
   auto_detect_context: true
   # 单条工具结果最多保留多少字符，超出会截断并加 [工具结果过长，已截断]
-  tool_result_max_chars: 4000
+  # 调整记录：v0.25.1 默认 4000 → Stage 2 起 1000（省 prompt processing，真机实测每 100 token ≈ 10s）
+  tool_result_max_chars: 1000
   # 回灌进 system prompt 的记忆条数上限（等价于 memory.max_items，这里优先级更高）
-  memory_max_items: 5
+  # 调整记录：5 → 3（减少固定前缀体积）
+  memory_max_items: 3
   # 记忆块最多占实际上下文的比例（0.10 = 10%）
   memory_max_ratio: 0.10
   # system prompt 的 token 目标上限（只用于提示，超过会在启动时告警）
   system_prompt_max_tokens: 300
   # 模型单次最多生成多少 token（控制生成长度，直接影响响应时间）
-  max_output_tokens: 512
+  # 调整记录：512 → 256
+  max_output_tokens: 256
   # 聊天工具门控：闲聊/知识问答里模型误发出的工具调用不执行，
   # 改为去掉工具说明重新回答一次（真机实测能把「闲聊误触发工具」降到 0）
   chat_tool_gate: true
+  # Web 工具的长度/超时硬限制（网页内容永远是不可信数据）
+  web_result_max_chars: 1500
+  web_fetch_max_chars: 2500
+  web_search_max_items: 5
+  web_timeout: 10
+
+# ============================================================
+# Stage 1/2/3 新增：多模型角色、工具分组、调度器
+# ============================================================
+
+# 模型角色：primary 常驻；vision/audio 默认不可用（没有部署就不伪装）
+models:
+  primary:
+    enabled: true
+  vision:
+    enabled: false
+    name: ""
+    endpoint: ""
+    timeout: 120
+    max_output_tokens: 256
+  audio:
+    enabled: false
+    name: ""
+    endpoint: ""
+    timeout: 120
+    max_output_tokens: 256
+
+# 调度器：当前 llama.cpp 只有 1 个 slot，模型并行默认关闭
+scheduler:
+  max_parallel_tasks: 2
+  max_active_models: 1
+  parallel_models: false
+  model_timeout: 300
+  tool_timeout: 15
 
 # ============================================================
 # 以下为 Portable Agent MVP 新增段（保持两层结构，Termux 无 PyYAML 也能解析）

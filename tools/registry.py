@@ -162,9 +162,23 @@ def tool_available(name: str) -> bool:
     if spec is None or not group_enabled(spec.get("group", "")):
         return False
     needs = spec.get("needs", "none")
-    if needs in ("none", "network"):
+    if needs == "none":
         return True
-    return bool(_RUNTIME["capabilities"].get(needs.replace("_provider", ""), False))
+    if needs == "network":
+        # 网络能力默认按可用处理（真正的失败由工具自己如实返回错误）
+        return bool(_RUNTIME["capabilities"].get("network", True))
+    capability_key = _NEEDS_CAPABILITY.get(needs)
+    if capability_key is None:
+        return False
+    return bool(_RUNTIME["capabilities"].get(capability_key, False))
+
+
+# 工具的 needs → 能力键
+_NEEDS_CAPABILITY = {
+    "vision_model": "vision",
+    "audio_model": "audio",
+    "music_provider": "music_provider",
+}
 
 
 def _available_tools(groups: List[str]) -> List[str]:

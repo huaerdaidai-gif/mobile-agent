@@ -69,6 +69,11 @@ DEFAULT_CONFIG = {
         "system_prompt_max_tokens": 300,
         "max_output_tokens": 512,
         "chat_tool_gate": True,
+        # Stage 2/3：Web 工具的限制（网页内容必须硬限制）
+        "web_result_max_chars": 1500,
+        "web_fetch_max_chars": 2500,
+        "web_search_max_items": 5,
+        "web_timeout": 10,
     },
 }
 
@@ -154,11 +159,13 @@ def load_config(path: str = CONFIG_PATH) -> dict:
     return config
 
 
-def build_agent(config: dict, llm=None, server_info: dict = None, verbose: bool = True) -> Agent:
+def build_agent(config: dict, llm=None, server_info: dict = None, verbose: bool = True,
+                extra_agent_kwargs: dict = None) -> Agent:
     """根据配置组装 LLM 与 Agent（含 v0.25.1 的上下文自动探测）。
 
     llm / server_info 可选：Gateway 会复用同一个 LLM 实例与已探测到的上下文，
     避免每个会话都重新探测一次；不传时行为与 v0.25.1 完全一致。
+    extra_agent_kwargs：Gateway 注入模型路由器 / 默认城市等（保持向后兼容）。
     """
     llm_config = config["llm"]
     agent_config = config["agent"]
@@ -203,6 +210,7 @@ def build_agent(config: dict, llm=None, server_info: dict = None, verbose: bool 
         memory_max_ratio=float(perf.get("memory_max_ratio", 0.10)),
         system_prompt_max_tokens=int(perf.get("system_prompt_max_tokens", 300)),
         verbose=verbose,
+        **(extra_agent_kwargs or {})
     )
     # 把探测信息挂到 agent 上，/status 与启动横幅直接用
     agent.server_info = server_info
