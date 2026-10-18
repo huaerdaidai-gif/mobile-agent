@@ -29,6 +29,21 @@ class WorkspaceFileTests(unittest.TestCase):
             self.assertFalse(result["ok"])
             self.assertIn("无效", result["error"])
 
+    def test_refuses_credentials_and_git_internals(self):
+        with tempfile.TemporaryDirectory() as root:
+            blocked = (".env", ".env.local", "server.pem", "signing.key", "id_device", "app_secret.json",
+                       "refresh_token.txt", ".git/config")
+            for relative in blocked:
+                path = os.path.join(root, relative)
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                with open(path, "w", encoding="utf-8") as handle:
+                    handle.write("must never be returned")
+            for relative in blocked:
+                with self.subTest(path=relative):
+                    result = file_tool.read_file(relative, project_root=root)
+                    self.assertFalse(result["ok"])
+                    self.assertIn("安全", result["error"])
+
 
 if __name__ == "__main__":
     unittest.main()

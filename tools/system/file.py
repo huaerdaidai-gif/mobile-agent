@@ -6,6 +6,7 @@
 """
 
 import os
+import fnmatch
 
 # 项目根目录（本文件位于 <项目>/tools/system/file.py）
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -35,6 +36,20 @@ def _relative(path: str, project_root: str = None) -> str:
     return os.path.relpath(path, root).replace(os.sep, "/")
 
 
+def _sensitive_path(relative: str) -> bool:
+    """Never send credentials, private keys, or Git internals to the model."""
+    parts = relative.replace("\\", "/").split("/")
+    for part in parts:
+        name = part.lower()
+        if name == ".git" or name == ".env" or name.startswith(".env."):
+            return True
+        if name.startswith("id_") or fnmatch.fnmatch(name, "*.pem") or fnmatch.fnmatch(name, "*.key"):
+            return True
+        if "secret" in name or "token" in name:
+            return True
+    return False
+
+
 def read_file(path: str, max_chars: int = MAX_READ_CHARS, project_root: str = None) -> dict:
     """读取文本文件，返回 {"ok": True, "path": ..., "content": ...}。"""
     try:
@@ -47,6 +62,10 @@ def read_file(path: str, max_chars: int = MAX_READ_CHARS, project_root: str = No
     if os.path.isdir(full):
         return {"ok": False, "error": "%s 是目录" % _relative(full, project_root)}
 
+    relative = _relative(full, project_root)
+    if _sensitive_path(relative):
+        return {"ok": False, "error": "出于安全考虑，不能读取密钥或 Git 内部文件"}
+
     try:
         with open(full, "r", encoding="utf-8", errors="replace") as f:
             content = f.read()
@@ -55,7 +74,7 @@ def read_file(path: str, max_chars: int = MAX_READ_CHARS, project_root: str = No
 
     return {
         "ok": True,
-        "path": _relative(full, project_root),
+        "path": relative,
         "content": content[:max_chars],
         "truncated": len(content) > max_chars,
     }
