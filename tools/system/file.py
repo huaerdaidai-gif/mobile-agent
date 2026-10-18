@@ -7,12 +7,14 @@
 
 import os
 import fnmatch
+import re
 
 # 项目根目录（本文件位于 <项目>/tools/system/file.py）
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # 单次读取的字符上限，防止大文件占满上下文窗口
 MAX_READ_CHARS = 4000
+PRIVATE_KEY_HEADER = re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----", re.IGNORECASE)
 
 
 def _resolve(path: str, project_root: str = None) -> str:
@@ -41,11 +43,25 @@ def _sensitive_path(relative: str) -> bool:
     parts = relative.replace("\\", "/").split("/")
     for part in parts:
         name = part.lower()
-        if name == ".git" or name == ".env" or name.startswith(".env."):
+        if name == ".git" or name == ".env" or name.startswith((".env.", ".env_", ".env-")):
             return True
-        if name.startswith("id_") or fnmatch.fnmatch(name, "*.pem") or fnmatch.fnmatch(name, "*.key"):
+        if name.startswith(".git-") and "credential" in name:
             return True
-        if "secret" in name or "token" in name:
+        if name in {".aws", ".ssh", ".docker", ".kube", ".npmrc", ".pypirc", ".netrc",
+                    ".git-credentials", ".gitconfig", "key.properties"}:
+            return True
+        if name.endswith((".env", ".envrc", ".pem", ".key", ".p8", ".p12", ".pfx",
+                          ".jks", ".keystore", ".ppk", ".tfstate")):
+            return True
+        if name.startswith(("credential", "credentials", "service-account")):
+            return True
+        if name.endswith(("_rsa", "_dsa", "_ecdsa", "_ed25519")):
+            return True
+        if re.match(r"^id_(?:rsa|dsa|ecdsa|ed25519)(?:\.pub)?$", name):
+            return True
+        if fnmatch.fnmatch(name, "*.pem") or fnmatch.fnmatch(name, "*.key"):
+            return True
+        if "secret" in name or ("token" in name and "tokeniz" not in name):
             return True
     return False
 
@@ -57,20 +73,22 @@ def read_file(path: str, max_chars: int = MAX_READ_CHARS, project_root: str = No
     except ValueError as exc:
         return {"ok": False, "error": str(exc)}
 
-    if not os.path.exists(full):
-        return {"ok": False, "error": "文件不存在：%s" % _relative(full, project_root)}
-    if os.path.isdir(full):
-        return {"ok": False, "error": "%s 是目录" % _relative(full, project_root)}
-
     relative = _relative(full, project_root)
     if _sensitive_path(relative):
         return {"ok": False, "error": "出于安全考虑，不能读取密钥或 Git 内部文件"}
+    if not os.path.exists(full):
+        return {"ok": False, "error": "文件不存在：%s" % relative}
+    if os.path.isdir(full):
+        return {"ok": False, "error": "%s 是目录" % relative}
 
     try:
         with open(full, "r", encoding="utf-8", errors="replace") as f:
             content = f.read()
     except OSError as exc:
         return {"ok": False, "error": "读取失败：%s" % exc}
+
+    if PRIVATE_KEY_HEADER.search(content):
+        return {"ok": False, "error": "出于安全考虑，不能读取密钥或 Git 内部文件"}
 
     return {
         "ok": True,
