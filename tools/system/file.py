@@ -14,34 +14,38 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(_
 MAX_READ_CHARS = 4000
 
 
-def _resolve(path: str) -> str:
+def _resolve(path: str, project_root: str = None) -> str:
     """把相对路径解析为项目目录内的绝对路径，越界时抛出 ValueError。"""
     if not path:
         raise ValueError("路径为空")
-    full = path if os.path.isabs(path) else os.path.join(PROJECT_ROOT, path)
+    root_value = os.path.abspath(project_root) if project_root else PROJECT_ROOT
+    if project_root and (os.path.islink(root_value) or not os.path.isdir(root_value)):
+        raise ValueError("项目目录无效")
+    full = path if os.path.isabs(path) else os.path.join(root_value, path)
     full = os.path.realpath(full)
-    root = os.path.realpath(PROJECT_ROOT)
+    root = os.path.realpath(root_value)
     if full != root and not full.startswith(root + os.sep):
-        raise ValueError("路径越界：只允许访问项目目录 %s 内的文件" % PROJECT_ROOT)
+        raise ValueError("路径越界：只允许访问项目目录内的文件")
     return full
 
 
-def _relative(path: str) -> str:
+def _relative(path: str, project_root: str = None) -> str:
     """返回相对项目根目录的路径，便于日志和结果展示。"""
-    return os.path.relpath(path, PROJECT_ROOT).replace(os.sep, "/")
+    root = os.path.realpath(project_root) if project_root else PROJECT_ROOT
+    return os.path.relpath(path, root).replace(os.sep, "/")
 
 
-def read_file(path: str, max_chars: int = MAX_READ_CHARS) -> dict:
+def read_file(path: str, max_chars: int = MAX_READ_CHARS, project_root: str = None) -> dict:
     """读取文本文件，返回 {"ok": True, "path": ..., "content": ...}。"""
     try:
-        full = _resolve(path)
+        full = _resolve(path, project_root=project_root)
     except ValueError as exc:
         return {"ok": False, "error": str(exc)}
 
     if not os.path.exists(full):
-        return {"ok": False, "error": "文件不存在：%s" % _relative(full)}
+        return {"ok": False, "error": "文件不存在：%s" % _relative(full, project_root)}
     if os.path.isdir(full):
-        return {"ok": False, "error": "%s 是目录，请用 shell 工具执行 ls 查看" % _relative(full)}
+        return {"ok": False, "error": "%s 是目录" % _relative(full, project_root)}
 
     try:
         with open(full, "r", encoding="utf-8", errors="replace") as f:
@@ -51,20 +55,20 @@ def read_file(path: str, max_chars: int = MAX_READ_CHARS) -> dict:
 
     return {
         "ok": True,
-        "path": _relative(full),
+        "path": _relative(full, project_root),
         "content": content[:max_chars],
         "truncated": len(content) > max_chars,
     }
 
 
-def write_file(path: str, content: str) -> dict:
+def write_file(path: str, content: str, project_root: str = None) -> dict:
     """写入文本文件（覆盖写），父目录不存在时自动创建。"""
     try:
-        full = _resolve(path)
+        full = _resolve(path, project_root=project_root)
     except ValueError as exc:
         return {"ok": False, "error": str(exc)}
     if os.path.isdir(full):
-        return {"ok": False, "error": "%s 是目录，不能写入" % _relative(full)}
+        return {"ok": False, "error": "%s 是目录，不能写入" % _relative(full, project_root)}
 
     try:
         parent = os.path.dirname(full)
@@ -77,6 +81,6 @@ def write_file(path: str, content: str) -> dict:
 
     return {
         "ok": True,
-        "path": _relative(full),
+        "path": _relative(full, project_root),
         "bytes": len((content or "").encode("utf-8")),
     }

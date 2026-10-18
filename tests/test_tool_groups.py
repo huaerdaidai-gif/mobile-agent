@@ -40,6 +40,16 @@ class ToolGroupsTest(unittest.TestCase):
         self.assertFalse(registry.tool_available("weather"))
         self.assertNotIn("weather", registry.tool_names())
 
+    def test_workspace_policy_limits_tools_and_rejects_file_writes(self):
+        registry.configure({"tools": {"system": {"enabled": True},
+                                      "allowed": ["file"], "file_read_only": True}})
+        self.assertEqual(["file"], registry.tool_names())
+        self.assertNotIn("content", registry.describe_parameters("file"))
+        self.assertFalse(registry.validate_arguments("file", {
+            "action": "write", "path": "note.txt", "content": "no"})[0])
+        self.assertTrue(registry.validate_arguments("file", {
+            "action": "read", "path": "README.md"})[0])
+
     def test_enabling_vision_group_only_helps_model_free_tools(self):
         registry.configure({"tools": {"vision": {"enabled": True}}})
         self.assertTrue(registry.tool_available("image_info"))

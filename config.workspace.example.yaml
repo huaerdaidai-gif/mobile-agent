@@ -1,0 +1,19 @@
+# Optional workspace-read-only profile for a trusted local control-plane Host.
+# Merge these settings into config.yaml; keep this gateway bound to loopback.
+llm:
+  # Replace with this phone's local MiniCPM5 OpenAI-compatible endpoint.
+  base_url: http://127.0.0.1:8080/v1
+
+gateway:
+  host: 127.0.0.1
+  port: 8787
+  auth: token
+  token: ${MOBILE_AGENT_GATEWAY_TOKEN}
+
+workspace:
+  enabled: true
+  # Match the Host Worker's configured task root. The Host Worker passes a
+  # specific task worktree; paths outside this directory are rejected.
+  allowed_root: ${MOBILE_AGENT_ALLOWED_WORKSPACE_ROOT}
+  # Each project gets a separate memory file; empty uses memory/projects.
+  memory_dir: ""

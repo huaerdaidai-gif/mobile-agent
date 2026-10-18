@@ -38,6 +38,7 @@ v0.25 新增（升级工具协议，提高 1B~4B 小模型的调用稳定性）�
 
 import json
 import os
+import threading
 import time
 from typing import Callable, Dict, List, Optional
 
@@ -46,6 +47,15 @@ from llm import LLM, LLMError
 from model.router import LightweightModelRouter
 from tool_parser import looks_like_tool_attempt, parse_legacy_tool_call, parse_tool_call
 from tools import registry
+
+_MEMORY_LOCKS = {}
+_MEMORY_LOCKS_GUARD = threading.Lock()
+
+
+def _memory_lock(path: str):
+    key = os.path.abspath(path)
+    with _MEMORY_LOCKS_GUARD:
+        return _MEMORY_LOCKS.setdefault(key, threading.Lock())
 from tools.time import get_current_time
 
 # 项目根目录与记忆文件位置
@@ -295,6 +305,7 @@ class Agent:
         audio_provider=None,
         audio_ffmpeg: str = "ffmpeg",
         audio_preprocess_timeout: int = 60,
+        tool_context: Optional[Dict] = None,
     ):
         self.llm = llm
         self.max_context = int(max_context)
@@ -336,6 +347,7 @@ class Agent:
         # 音频预处理（只做 ffmpeg 转码；不是模型、不是工具）
         self.audio_ffmpeg = audio_ffmpeg or "ffmpeg"
         self.audio_preprocess_timeout = int(audio_preprocess_timeout or 60)
+        self._request_tool_context = dict(tool_context or {})
         # 最近一次请求的路由结果（只用于观测/测试，不参与逻辑）
         self.last_route: Dict = {}
         # 最近一次请求的分级耗时（生产只打印 total/ttft/tool/model）
@@ -1012,7 +1024,12 @@ class Agent:
 
     def _tool_context(self) -> Dict:
         """传给工具执行层的上下文（超时、默认城市等）。"""
-        return {"tool_timeout": self.tool_timeout, "default_location": self.default_location}
+        return {"tool_timeout": self.tool_timeout, "default_location": self.default_location,
+                **self._request_tool_context}
+
+    def set_tool_context(self, context: Dict) -> None:
+        """Set authenticated per-request context while the Session lock is held."""
+        self._request_tool_context = dict(context or {})
 
     def _limit_tool_result(self, text: str) -> str:
         """限制工具结果长度（字符数 + token 预算双重约束），超出则截断并加标记。
@@ -1129,14 +1146,18 @@ class Agent:
         """把一轮问答追加写入 memory/memory.json（条数有上限，原子写）。"""
         if not self.memory_enabled:
             return  # 记忆功能关闭时不读也不写
-        history = self.memory.setdefault("history", [])
-        history.append({
-            "time": get_current_time()["datetime"],
-            "user": _brief(question, 300),
-            "assistant": _brief(answer, 600),
-        })
-        self.memory["history"] = history[-self.max_memory_entries:]
-        self._write_memory(self.memory)
+        with _memory_lock(self.memory_path):
+            memory = self._load_memory()
+            history = memory.setdefault("history", [])
+            history.append({
+                "time": get_current_time()["datetime"],
+                "user": _brief(question, 300),
+                "assistant": _brief(answer, 600),
+            })
+            memory["history"] = history[-self.max_memory_entries:]
+            self.memory = memory
+            self._write_memory(memory)
+            self.memory_block, self.memory_items = self._build_memory_block()
 
     def _recent_memory_entries(self, limit: int) -> List[Dict]:
         """取出最近 limit 条「有效」记忆（跳过结构不完整的记录）。"""

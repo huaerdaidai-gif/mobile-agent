@@ -125,6 +125,13 @@ gateway:
   max_sessions: 16
   idle_seconds: 3600
 
+# 可选工作区模式：仅用于绑定到本机受信 Host Worker 的实例。
+# 启用后必须 loopback 监听并使用 token；服务端只开放当前工作区的只读 file 工具，
+# project_id / project_root 由已认证的本机 Worker 随请求提供，记忆按 project_id 隔离。
+workspace:
+  enabled: false
+  memory_dir: ""         # 留空使用安装目录下 memory/projects
+
 # QQ Bot（OneBot v11 HTTP）
 qq:
   enabled: false

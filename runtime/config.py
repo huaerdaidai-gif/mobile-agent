@@ -44,6 +44,12 @@ DEFAULT_SECTIONS = {
     "host": {
         "profile": "auto",       # auto | termux | generic
     },
+    "workspace": {
+        "enabled": False,        # trusted loopback control-plane context
+        "memory_dir": "",        # empty uses <install>/memory/projects
+        "allowed_root": "",      # absolute task-root directory, required when enabled
+        "allowed_roots": [],      # optional roots to further constrain project_root
+    },
     # 工具组开关（v0.25.1 的标量键保持兼容；新增按组开关）
     "tools": {
         "enabled": True,

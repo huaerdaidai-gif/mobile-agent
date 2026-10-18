@@ -170,9 +170,17 @@ class GatewayRequestHandler(BaseHTTPRequestHandler):
         body = self._read_json()
         text = str(body.get("text") or body.get("message") or "").strip()
         session_id = str(body.get("session_id") or identity.get("identity") or "api:default")
+        project_id = body.get("project_id")
+        project_root = body.get("project_root")
         if not text:
             self._send_json(400, {"ok": False, "error": "缺少 text 字段"})
             return
+        if getattr(self.server.service, "workspace_mode", False):
+            try:
+                self.server.service._workspace_context(project_id, project_root)
+            except ValueError as exc:
+                self._send_json(400, {"ok": False, "error": str(exc)})
+                return
 
         if stream:
             # 无 Content-Length + 关闭连接：客户端可以边读边处理
@@ -190,15 +198,18 @@ class GatewayRequestHandler(BaseHTTPRequestHandler):
                     pass
 
             try:
-                self.server.service.ask(text, session_id=session_id, on_text=emit)
+                self.server.service.ask(text, session_id=session_id, on_text=emit,
+                                        project_id=project_id, project_root=project_root)
             except Exception as exc:  # 流已开始，只能把错误写进响应体
                 emit("\n[错误] %s" % exc)
             return
 
         try:
-            reply = self.server.service.ask(text, session_id=session_id)
+            reply = self.server.service.ask(text, session_id=session_id,
+                                            project_id=project_id, project_root=project_root)
         except Exception as exc:
-            self._send_json(502, {"ok": False, "error": str(exc)[:300], "session_id": session_id})
+            status = 400 if isinstance(exc, ValueError) else 502
+            self._send_json(status, {"ok": False, "error": str(exc)[:300], "session_id": session_id})
             return
         self._send_json(200, {"ok": True, "reply": reply, "session_id": session_id})
 

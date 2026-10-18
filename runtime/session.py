@@ -24,11 +24,13 @@ class Session(object):
         self.turns = 0
 
     def ask(self, text: str, on_text: Optional[Callable[[str], None]] = None,
-            attachments: Optional[Dict] = None) -> str:
+            attachments: Optional[Dict] = None, tool_context: Optional[Dict] = None) -> str:
         """处理一次提问。attachments 只透传给 Agent，不写入会话状态。"""
         with self.lock:
             self.last_used = time.time()
             self.turns += 1
+            if tool_context is not None and hasattr(self.agent, "set_tool_context"):
+                self.agent.set_tool_context(tool_context)
             return self.agent.ask(text, on_text=on_text, attachments=attachments)
 
 
@@ -43,13 +45,13 @@ class SessionManager(object):
         self._sessions: Dict[str, Session] = {}
         self._lock = threading.Lock()
 
-    def get(self, session_id: str) -> Session:
+    def get(self, session_id: str, factory: Callable[[], object] = None) -> Session:
         session_id = session_id or "default"
         with self._lock:
             self._evict()
             session = self._sessions.get(session_id)
             if session is None:
-                session = Session(session_id, self.factory())
+                session = Session(session_id, (factory or self.factory)())
                 self._sessions[session_id] = session
                 agent_log.log("RUNTIME", "新建会话", session=session_id,
                               total=len(self._sessions))

@@ -8,7 +8,10 @@
 """
 
 import json
+import copy
+import hashlib
 import os
+import re
 
 import main as core_cli
 from adapter.capability import register_core_tools
@@ -59,13 +62,42 @@ class AgentService(object):
                           source=self.server_info.get("source"),
                           error=self.server_info.get("error"))
 
+        self.workspace_mode = bool((self.config.get("workspace") or {}).get("enabled", False))
+        self.workspace_roots = []
+        # Workspace mode is deliberately a locked-down profile, not a prompt convention.
+        if self.workspace_mode:
+            gateway_config = self.config.get("gateway") or {}
+            if (str(gateway_config.get("host", "127.0.0.1")) not in {"127.0.0.1", "localhost", "::1"}
+                    or str(gateway_config.get("auth", "none")).lower() != "token"
+                    or not str(gateway_config.get("token") or "").strip()):
+                raise ValueError("workspace mode requires loopback binding and gateway token authentication")
+            workspace_config = self.config.get("workspace") or {}
+            roots = list(workspace_config.get("allowed_roots") or [])
+            if not roots and workspace_config.get("allowed_root"):
+                roots = [workspace_config.get("allowed_root")]
+            for value in roots:
+                if not isinstance(value, str) or not os.path.isabs(os.path.expanduser(value)):
+                    raise ValueError("workspace allowed_root must be an absolute path")
+                root = os.path.abspath(os.path.expanduser(value))
+                if os.path.islink(root) or not os.path.isdir(root):
+                    raise ValueError("workspace allowed_root is unavailable")
+                self.workspace_roots.append(os.path.realpath(root))
+            if not self.workspace_roots:
+                raise ValueError("workspace mode requires an explicit allowed_root")
+            tools_config = self.config.setdefault("tools", {})
+            tools_config.update({"enabled": True, "allowed": ["file"], "file_read_only": True,
+                                 "core": {"enabled": False}, "system": {"enabled": True},
+                                 "web": {"enabled": False}, "writing": {"enabled": False},
+                                 "vision": {"enabled": False}, "audio": {"enabled": False},
+                                 "music": {"enabled": False}})
+
         # Stage 2：按配置 + 真实能力配置工具注册表（不可用的工具绝不进 schema）
         self.tool_registry_configured = True
         tool_registry.configure(
             self.config,
             capabilities={"vision": bool(self.model_registry.vision().supports_vision()),
                           "audio": bool(self.model_registry.audio().supports_audio()),
-                          "network": True, "music_provider": False},
+                          "network": not self.workspace_mode, "music_provider": False},
             limits=dict(runtime_config.web_limits(self.config),
                         tool_timeout=int((self.config.get("scheduler") or {}).get("tool_timeout", 15))))
 
@@ -83,12 +115,20 @@ class AgentService(object):
 
     # ---------------- 核心入口 ----------------
 
-    def new_agent(self):
+    def new_agent(self, project_id: str = None):
         """新建一个 Agent（复用同一个 Provider 与已探测的上下文）。"""
         weather_section = (self.config.get("tools") or {}).get("weather")
         default_location = str(weather_section.get("default_location", "") or "") \
             if isinstance(weather_section, dict) else ""
-        return core_cli.build_agent(self.config, llm=self.provider.llm,
+        config = self.config
+        if self.workspace_mode and project_id:
+            config = copy.deepcopy(self.config)
+            workspace = config.get("workspace") or {}
+            memory_dir = str(workspace.get("memory_dir") or
+                             os.path.join(PROJECT_ROOT, "memory", "projects"))
+            project_key = hashlib.sha256(project_id.encode("utf-8")).hexdigest()
+            config.setdefault("memory", {})["path"] = os.path.join(memory_dir, project_key + ".json")
+        return core_cli.build_agent(config, llm=self.provider.llm,
                                     server_info=self.server_info, verbose=False,
                                     extra_agent_kwargs={
                                         "model_router": self.model_router,
@@ -96,10 +136,20 @@ class AgentService(object):
                                     })
 
     def ask(self, text: str, session_id: str = "default", on_text=None,
-            attachments: dict = None) -> str:
+            attachments: dict = None, project_id: str = None, project_root: str = None) -> str:
         """处理一句话，返回回复文本。attachments（图片/音频）只透传给 Agent。"""
-        session = self.sessions.get(session_id)
-        reply = session.ask(text, on_text=on_text, attachments=attachments)
+        tool_context = None
+        if self.workspace_mode:
+            project_id, project_root = self._workspace_context(project_id, project_root)
+            session_id = "workspace:" + hashlib.sha256(
+                (project_id + "\0" + str(session_id)).encode("utf-8")).hexdigest()
+            tool_context = {"project_root": project_root}
+            factory = lambda: self.new_agent(project_id=project_id)
+        else:
+            factory = None
+        session = self.sessions.get(session_id, factory=factory)
+        reply = session.ask(text, on_text=on_text, attachments=attachments,
+                            tool_context=tool_context)
         timing = getattr(session.agent, "last_timing", None) or {}
         if timing:
             # 生产日志只保留 4 个数字；详细 timing 只在 DEBUG 打
@@ -109,6 +159,20 @@ class AgentService(object):
             agent_log.log("CORE", "timing_detail %s" % json.dumps(timing, ensure_ascii=False),
                           level="DEBUG")
         return reply
+
+    def _workspace_context(self, project_id, project_root):
+        if not isinstance(project_id, str) or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}", project_id):
+            raise ValueError("workspace project_id is invalid")
+        if not isinstance(project_root, str) or not os.path.isabs(project_root):
+            raise ValueError("workspace project_root must be an absolute path")
+        candidate = os.path.abspath(project_root)
+        if os.path.islink(candidate) or not os.path.isdir(candidate):
+            raise ValueError("workspace project_root is unavailable")
+        resolved = os.path.realpath(candidate)
+        if not any(resolved == allowed or resolved.startswith(allowed + os.sep)
+                   for allowed in self.workspace_roots):
+            raise ValueError("workspace project_root is outside configured roots")
+        return project_id, resolved
 
     # ---------------- 状态与健康 ----------------
 

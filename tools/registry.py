@@ -124,6 +124,8 @@ _RUNTIME = {
     "groups": {},          # group -> enabled
     "capabilities": {},    # {"vision": bool, "audio": bool, "network": bool, "music_provider": bool}
     "limits": {},          # web 长度/超时等
+    "allowed_tools": None, # optional process-wide allowlist
+    "file_read_only": False,
     "configured": False,
 }
 _SCHEMA_CACHE: Dict[Tuple, str] = {}
@@ -139,9 +141,15 @@ def configure(config: dict = None, capabilities: dict = None, limits: dict = Non
         enabled = bool(section.get("enabled")) if isinstance(section, dict) \
             else bool(meta.get("default_enabled", False))
         groups[name] = enabled
+    allowed = tools_config.get("allowed")
+    allowed_tools = (frozenset(str(name).strip() for name in allowed
+                               if isinstance(name, str) and str(name).strip())
+                     if isinstance(allowed, list) else None)
     _RUNTIME["groups"] = groups
     _RUNTIME["capabilities"] = dict(capabilities or {})
     _RUNTIME["limits"] = dict(limits or {})
+    _RUNTIME["allowed_tools"] = allowed_tools
+    _RUNTIME["file_read_only"] = bool(tools_config.get("file_read_only", False))
     _RUNTIME["configured"] = True
     _SCHEMA_CACHE.clear()
 
@@ -159,6 +167,9 @@ def enabled_groups() -> List[str]:
 def tool_available(name: str) -> bool:
     """工具当前是否真的可用（配置 + 能力双重判断，绝不假装）。"""
     spec = TOOLS.get(name)
+    allowed = _RUNTIME.get("allowed_tools")
+    if allowed is not None and name not in allowed:
+        return False
     if spec is None or not group_enabled(spec.get("group", "")):
         return False
     needs = spec.get("needs", "none")
@@ -220,7 +231,7 @@ def list_tools() -> List[Dict]:
     """当前可用工具的条目（保持 v0.25.1 的字段 + 新增 group/risk）。"""
     entries = []
     for name in tool_names():
-        spec = TOOLS[name]
+        spec = _effective_spec(name)
         entries.append({"name": name, "group": spec.get("group", ""),
                         "description": spec.get("description", ""),
                         "parameters": dict(spec.get("parameters") or {}),
@@ -228,6 +239,17 @@ def list_tools() -> List[Dict]:
                         "risk": spec.get("risk", "low"),
                         "untrusted": bool(spec.get("untrusted", False))})
     return entries
+
+
+def _effective_spec(name: str) -> Dict:
+    """Return the schema adjusted to the enforced runtime policy."""
+    spec = dict(TOOLS[name])
+    if name == "file" and _RUNTIME.get("file_read_only"):
+        spec["description"] = "只读项目文件"
+        spec["parameters"] = {"action": "string", "path": "string"}
+        spec["required"] = ["action", "path"]
+        spec["examples"] = [{"action": "read", "path": "README.md"}]
+    return spec
 
 
 def groups_summary() -> List[Dict]:
@@ -255,7 +277,7 @@ def describe_tools() -> str:
 
 
 def describe_parameters(name: str) -> str:
-    spec = get_tool(name) or {}
+    spec = _effective_spec(name) if name in TOOLS else {}
     parameters = spec.get("parameters") or {}
     if not parameters:
         return "无参数"
@@ -283,8 +305,11 @@ def schema_text(groups: List[str] = None) -> str:
         return cached
     lines = []
     for name in _available_tools(groups):
-        spec = TOOLS[name]
-        detail = describe_parameters(name)
+        spec = _effective_spec(name)
+        parameters = spec.get("parameters") or {}
+        required = set(spec.get("required") or [])
+        detail = "、".join("%s（%s%s）" % (key, kind, "，必填" if key in required else "")
+                            for key, kind in parameters.items()) or "无参数"
         lines.append("- %s：%s，%s" % (name, spec.get("description", ""), detail))
     text = ""
     if lines:
@@ -328,10 +353,15 @@ def validate_arguments(name: str, arguments: Dict) -> Tuple[bool, str]:
             name, spec.get("group"), spec.get("group"))
     if not tool_available(name):
         return False, "工具 %s 当前不可用（需要 %s，实际 UNAVAILABLE）" % (name, spec.get("needs"))
+    if name == "file" and _RUNTIME.get("file_read_only"):
+        action = arguments.get("action") if isinstance(arguments, dict) else None
+        if not isinstance(action, str) or action.strip().lower() != "read":
+            return False, "当前策略只允许读取项目文件"
     if not isinstance(arguments, dict):
         return False, "arguments 必须是 JSON 对象，例如 {\"command\": \"ls\"}"
-    allowed = spec.get("parameters") or {}
-    required = spec.get("required") or []
+    effective = _effective_spec(name)
+    allowed = effective.get("parameters") or {}
+    required = effective.get("required") or []
     missing = [key for key in required if key not in arguments]
     if missing:
         return False, "缺少必填参数：%s（该工具的参数：%s）" % (
@@ -372,7 +402,7 @@ def _do_file(arguments, context):
     path = str(arguments.get("path", ""))
     if action == "write":
         return file_tool.write_file(path, str(arguments.get("content", "")))
-    return file_tool.read_file(path)
+    return file_tool.read_file(path, project_root=context.get("project_root"))
 
 
 def _do_weather(arguments, context):

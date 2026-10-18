@@ -272,7 +272,8 @@ python3 -m unittest discover -s tests
 | --- | --- | --- |
 | v0.25.1 | tag `v0.25.1` | 72 |
 | v0.26 | tag `v0.26` | 147 |
-| v0.27 | tag `v0.27`（当前） | 199 |
+| v0.27 | tag `v0.27` | 199 |
+| v0.27-w | tag `v0.27-w`（工作区代码能力） | 238 |
 
 版本行的数字是在对应 commit 上实际跑 `python3 -m unittest discover -s tests` 得到的，
 不是开发过程里的中间值。
@@ -310,6 +311,14 @@ python3 -m unittest discover -s tests
 - 纯图片消息默认问题 `请描述这张图片。`；
 - QQ → attachments → Agent → Vision 的透传链路与回归测试；
 - 199 tests。
+
+### v0.27-w（工作区代码能力）
+
+- 新增可选的 workspace profile：模型只获得指定工作区的文件读取能力；不提供 shell、写入和联网工具；
+- 工作区路径由可信 Host 请求上下文传入，并在服务端限制到显式允许根目录；拒绝越界路径和符号链接工作区根目录；
+- 按项目隔离会话与记忆；gateway 必须绑定 loopback 并启用 token 认证；
+- 默认配置与原有 v0.27 行为保持兼容，未启用 workspace profile 时功能不变；
+- 238 项离线测试通过。
 
 ## 已知限制
 

@@ -94,6 +94,17 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(config["llm"]["model"], "mock-model")
         self.assertTrue(config["_memory_path"].endswith("memory.json"))
 
+    def test_workspace_example_uses_simple_yaml_and_generic_host_variables(self):
+        from main import _parse_simple_yaml
+        path = os.path.join(os.path.dirname(os.path.dirname(__file__)),
+                            "config.workspace.example.yaml")
+        with open(path, "r", encoding="utf-8") as handle:
+            config = _parse_simple_yaml(handle.read())
+        self.assertTrue(config["workspace"]["enabled"])
+        self.assertEqual("${MOBILE_AGENT_ALLOWED_WORKSPACE_ROOT}",
+                         config["workspace"]["allowed_root"])
+        self.assertEqual("${MOBILE_AGENT_GATEWAY_TOKEN}", config["gateway"]["token"])
+
 
 if __name__ == "__main__":
     unittest.main()
