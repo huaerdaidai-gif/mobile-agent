@@ -1,6 +1,6 @@
 # Workspace integration profile
 
-`v0.27-w` adds an opt-in profile for a trusted local controller that wants a
+`v0.27-w.1` adds an opt-in profile for a trusted local controller that wants a
 mobile model to inspect a specific task workspace. The default installation
 does not enable this profile and retains the normal `v0.27` tool settings.
 
@@ -15,6 +15,14 @@ does not enable this profile and retains the normal `v0.27` tool settings.
 - Session context and persistent memory are scoped by project identifier.
 - Keep the gateway token and workspace root in the local, untracked runtime
   configuration. Never copy credentials into task payloads or public logs.
+- `GET /api/agent-card` returns an authenticated, path-free capability record
+  only when this profile is enabled. A same-device Host can use it to discover
+  the Agent and advertise it as a conversation-only local model. The standard
+  gateway listens on `127.0.0.1:8787`; custom ports must be configured locally.
+- Configure the local controller's token-file option to a separate owner-only
+  file containing the same gateway token. The controller probes the card
+  locally, then sends only the allowlisted Agent identity in its heartbeat.
+  The token and workspace path never go to the platform registry.
 
 See `config.workspace.example.yaml` for a generic configuration example.
 The local controller should call the gateway root URL (for example,

@@ -131,7 +131,9 @@ class GatewayRequestHandler(BaseHTTPRequestHandler):
         path = self._path()
         if path in ("/", "/index"):
             self._send_json(200, {"service": "mobile-agent gateway",
-                                  "routes": ["/health", "/api/chat", "/api/chat/stream", "/qq/onebot"]})
+                                  "routes": ["/health", "/api/agent-card", "/api/chat", "/api/chat/stream", "/qq/onebot"]})
+        elif path == "/api/agent-card":
+            self._agent_card()
         elif path == "/health":
             self._health()
         else:
@@ -158,6 +160,31 @@ class GatewayRequestHandler(BaseHTTPRequestHandler):
         payload = gateway_health.collect(server.service, gateway_state=server.state(),
                                          model_probe=probe)
         self._send_json(200 if payload.get("ok") else 503, payload)
+
+    def _agent_card(self):
+        """Expose a small, non-secret capability card for same-device discovery."""
+        ok, identity = self._authorized()
+        if not ok:
+            self._send_json(401, {"ok": False, "error": (identity or {}).get("error", "认证失败")})
+            return
+        service = self.server.service
+        if not service.workspace_mode:
+            self._send_json(404, {"ok": False, "error": "workspace_profile_disabled"})
+            return
+        llm = service.config.get("llm") or {}
+        model = (service.config.get("model") or {}).get("name") or llm.get("model") or "local-model"
+        self._send_json(200, {
+            "protocol": "mobile-agent-device/v1",
+            "agent_id": "mobile-agent",
+            "version": __import__("main").VERSION,
+            "profile": "workspace-read-only",
+            "display_name": "Mobile Agent · " + str(model)[:80],
+            "model": str(model)[:80],
+            "capabilities": ["chat", "workspace.read"],
+            "permissions": {"read_files": True, "write_files": False,
+                            "shell": False, "network": False},
+            "authentication_required": str(self.server.auth_mode).lower() == "token",
+        })
 
     def _authorized(self) -> tuple:
         return self.server.auth.authorize(self._headers())

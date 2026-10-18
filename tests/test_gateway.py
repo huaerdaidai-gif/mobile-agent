@@ -110,6 +110,28 @@ class GatewayTest(unittest.TestCase):
                                headers={"Authorization": "Bearer s3cret"})
         self.assertEqual(status, 200, payload)
 
+    def test_workspace_agent_card_is_authenticated_and_read_only(self):
+        base = self.start_gateway(
+            gateway={"auth": "token", "token": "s3cret"},
+            workspace={"enabled": True, "allowed_root": self.tmpdir},
+        )
+        status, payload = http(base + "/api/agent-card")
+        self.assertEqual(status, 401, payload)
+        status, payload = http(base + "/api/agent-card", headers={"Authorization": "Bearer s3cret"})
+        self.assertEqual(status, 200, payload)
+        self.assertEqual(payload["protocol"], "mobile-agent-device/v1")
+        self.assertEqual(payload["agent_id"], "mobile-agent")
+        self.assertEqual(payload["profile"], "workspace-read-only")
+        self.assertEqual(payload["permissions"], {
+            "read_files": True, "write_files": False, "shell": False, "network": False,
+        })
+        self.assertNotIn("allowed_root", payload)
+
+    def test_agent_card_is_not_available_in_default_profile(self):
+        base = self.start_gateway()
+        status, payload = http(base + "/api/agent-card")
+        self.assertEqual(status, 404, payload)
+
     def test_admin_disabled_by_default(self):
         base = self.start_gateway()
         status, payload = http(base + "/admin/restart", {})
