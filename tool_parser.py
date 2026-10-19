@@ -20,10 +20,54 @@
 """
 
 import json
+import html
+import re
 from typing import Dict, List, Optional
 
 # 协议里固定的类型标记
 TOOL_CALL_TYPE = "tool_call"
+
+_FUNCTION_BLOCK = re.compile(
+    r'<function\s+name\s*=\s*(["\'])([\w.-]+)\1\s*>(.*?)</function\s*>',
+    re.IGNORECASE | re.DOTALL)
+_PARAM_BLOCK = re.compile(
+    r'<param\s+name\s*=\s*(["\'])([\w.-]+)\1\s*>(.*?)</param\s*>',
+    re.IGNORECASE | re.DOTALL)
+_THINK_BLOCK = re.compile(r'<think\b[^>]*>.*?</think\s*>', re.IGNORECASE | re.DOTALL)
+
+
+def parse_minicpm_function_call(text: str) -> Optional[Dict]:
+    """Parse MiniCPM's XML-like function call envelope without guessing fields.
+
+    A complete function may be surrounded by short prose and closed think
+    blocks. Every argument must be a complete, uniquely named param element;
+    nested or truncated markup is rejected.
+    """
+    if not isinstance(text, str) or not text.strip():
+        return None
+    source = _THINK_BLOCK.sub('', text).strip()
+    if re.search(r'<think\b', source, re.IGNORECASE):
+        return None
+    matches = list(_FUNCTION_BLOCK.finditer(source))
+    if len(matches) != 1 or len(source[:matches[0].start()]) + len(source[matches[0].end():]) > 200:
+        return None
+    match = matches[0]
+    if re.search(r'</?function\b', source[:match.start()] + source[match.end():], re.IGNORECASE):
+        return None
+    body = match.group(3)
+    arguments = {}
+    cursor = 0
+    for param in _PARAM_BLOCK.finditer(body):
+        if body[cursor:param.start()].strip():
+            return None
+        name = param.group(2)
+        if name in arguments or re.search(r'</?\w+\b', param.group(3)):
+            return None
+        arguments[name] = html.unescape(param.group(3)).strip()
+        cursor = param.end()
+    if body[cursor:].strip():
+        return None
+    return {"type": TOOL_CALL_TYPE, "name": match.group(2), "arguments": arguments}
 
 # 小模型（尤其 Qwen2.5-3B 在中文语境下）经常把 JSON 里的半角标点写成全角，
 # 例如 {"type":"tool_call","name":"time","arguments：{}}

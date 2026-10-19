@@ -45,7 +45,8 @@ from typing import Callable, Dict, List, Optional
 from adapter.model import audio_preprocess
 from llm import LLM, LLMError
 from model.router import LightweightModelRouter
-from tool_parser import looks_like_tool_attempt, parse_legacy_tool_call, parse_tool_call
+from tool_parser import (looks_like_tool_attempt, parse_legacy_tool_call, parse_minicpm_function_call,
+                         parse_tool_call)
 from tools import registry
 
 _MEMORY_LOCKS = {}
@@ -83,7 +84,7 @@ INVALID_JSON_NUDGE = (
 )
 
 # 流式输出时，出现这些字符就先暂存，避免把工具调用的 JSON 显示给用户
-SUSPICIOUS_CHARS = ("{", "`")
+SUSPICIOUS_CHARS = ("{", "`", "<")
 
 # 会话消息条数硬上限（双保险：正常情况下 max_context 裁剪会更早生效）
 HISTORY_HARD_LIMIT = 200
@@ -230,7 +231,7 @@ class _StreamGate:
     小模型既可能输出普通回答，也可能输出工具调用 JSON。为了既「边生成边显示」，
     又不把内部 JSON 刷到用户眼前，这里做一个很轻的判断：
 
-      - 还没出现可疑字符（{ 或 `）→ 当普通回答，立刻显示；
+      - 还没出现可疑字符（{、` 或 <）→ 当普通回答，立刻显示；
       - 一旦出现可疑字符 → 先暂存，等这轮生成结束由 Agent 决定丢掉还是补显。
 
     开关只在「这一轮尚未开始显示」时生效，之后一律直通，不会引入额外延迟。
@@ -993,6 +994,14 @@ class Agent:
             if call is not None:
                 self._status("[提示] 模型用了全角标点，已按半角解析")
                 return call
+        # MiniCPM may emit its native XML-like envelope. Require the current
+        # registry to accept the tool and every argument before dispatching it.
+        native_call = parse_minicpm_function_call(reply)
+        if native_call is not None:
+            valid, _reason = registry.validate_arguments(
+                native_call["name"], native_call["arguments"])
+            if valid:
+                return native_call
         if self.legacy_protocol:  # 过渡期开关，默认关闭
             return parse_legacy_tool_call(reply)
         return None
