@@ -9,7 +9,8 @@ import unittest
 from unittest import mock
 
 import llm as llm_module
-from llm import LLM, LLMError, detect_server_capabilities, detect_server_context, load_api_key_file
+from llm import (LLM, LLMError, _load_object, _redact_stream, _safe_error,
+                 detect_server_capabilities, detect_server_context, load_api_key_file)
 from tests.mock_model import MockModelServer
 
 
@@ -58,6 +59,29 @@ class LLMApiKeyTest(unittest.TestCase):
                 os.unlink(link)
             except OSError:
                 pass
+
+    def test_stream_redaction_emits_safe_chunks_without_buffering_and_keeps_prior_text(self):
+        chunks = _redact_stream(iter(["hello test-", "secret-key"]), self.key)
+        self.assertEqual(next(chunks), "hello ")
+        self.assertEqual(next(chunks), "***")
+
+        def interrupted():
+            yield "previous text."
+            raise RuntimeError("stream stopped")
+
+        chunks = _redact_stream(interrupted(), self.key)
+        self.assertEqual(next(chunks), "previous text.")
+        with self.assertRaisesRegex(RuntimeError, "stream stopped"):
+            next(chunks)
+
+    def test_redaction_happens_before_error_truncation(self):
+        value = "x" * 199 + "UNIQUE_SECRET_VALUE"
+        sanitized = _safe_error(value, "UNIQUE_SECRET_VALUE", max_chars=200)
+        self.assertEqual(sanitized, "x" * 199 + "*")
+        self.assertNotIn("U", sanitized)
+        with self.assertRaisesRegex(LLMError, r"\*\*\*") as caught:
+            _load_object('{"error":"UNIQUE_SECRET_VALUE"}', api_key="UNIQUE_SECRET_VALUE")
+        self.assertNotIn("UNIQUE_SECRET_VALUE", str(caught.exception))
 
     def test_key_is_sent_for_chat_stream_and_model_probes(self):
         client = LLM(base_url=self.server.base_url, api_key=self.key, timeout=5)
@@ -148,6 +172,15 @@ class LLMApiKeyTest(unittest.TestCase):
         with mock.patch.dict(os.environ, {"MOBILE_AGENT_LLM_API_KEY_FILE": self.key_path}):
             provider = build_provider(config)
             self.assertTrue(provider.health()["ok"])
+        self.assertEqual(self.server.request_headers[-1][1], "Bearer " + self.key)
+
+    def test_model_registry_primary_provider_uses_key_file_for_probe(self):
+        from model.registry import ModelRegistry
+        from tests import helpers
+        config = helpers.make_config(self.server.base_url, tempfile.gettempdir())
+        config["llm"]["api_key_file"] = self.key_path
+        registry = ModelRegistry(config, probe=True)
+        self.assertEqual(registry.primary().model_info().context, 2048)
         self.assertEqual(self.server.request_headers[-1][1], "Bearer " + self.key)
 
 

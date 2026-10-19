@@ -11,7 +11,7 @@
 
 from typing import Dict, List
 
-from adapter.model.openai_compatible import OpenAICompatibleProvider
+from adapter.model.openai_compatible import OpenAICompatibleProvider, build_provider
 from adapter.model.unavailable import UnavailableProvider
 from adapter.model.whisper import WhisperProvider
 from runtime import config as runtime_config
@@ -38,11 +38,7 @@ class ModelRegistry(object):
         if primary_provider is not None:
             self.providers["primary"] = primary_provider
             return
-        settings = runtime_config.model_settings(self.config)
-        self.providers["primary"] = OpenAICompatibleProvider(
-            base_url=settings["base_url"], name=settings["name"],
-            temperature=settings["temperature"], timeout=settings["timeout"],
-            max_output_tokens=settings["max_output_tokens"], role="primary", kind="text")
+        self.providers["primary"] = build_provider(self.config)
 
     def _build_optional(self, role: str, kind: str) -> None:
         """vision/audio：只有配置明确 enabled + 端点 才构造真实 Provider。

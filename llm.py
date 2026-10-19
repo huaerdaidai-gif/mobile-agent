@@ -87,11 +87,13 @@ def load_api_key_file(path: str = "") -> str:
         os.close(descriptor)
 
 
-def _safe_error(value, api_key: str = "") -> str:
+def _safe_error(value, api_key: str = "", max_chars: int = None) -> str:
     """Prevent a server or transport error from reflecting the configured key."""
     text = str(value)
     key = str(api_key or "")
-    return text.replace(key, "***") if key else text
+    if key:
+        text = text.replace(key, "***")
+    return text[:max_chars] if max_chars is not None else text
 
 
 def _redact_value(value, api_key: str = ""):
@@ -114,26 +116,31 @@ def _redact_stream(chunks, api_key: str):
         return
     pending = ""
     output = []
-    output_size = 0
-    for chunk in chunks:
-        pending += str(chunk)
-        while pending:
-            if pending.startswith(key):
-                output.append("***")
-                output_size += 3
-                pending = pending[len(key):]
-            elif key.startswith(pending):
-                break
-            else:
-                output.append(pending[0])
-                output_size += 1
-                pending = pending[1:]
-            if output_size >= 64:
+    try:
+        for chunk in chunks:
+            pending += str(chunk)
+            while pending:
+                if pending.startswith(key):
+                    output.append("***")
+                    pending = pending[len(key):]
+                elif key.startswith(pending):
+                    break
+                else:
+                    output.append(pending[0])
+                    pending = pending[1:]
+            # Emit safe text after each source chunk; retain only a possible key prefix.
+            if output:
                 yield "".join(output)
                 output = []
-                output_size = 0
+    except Exception:
+        # The pending text may be a secret prefix; redact it while preserving prior output.
+        if pending:
+            output.append("***")
+        if output:
+            yield "".join(output)
+        raise
     if pending:
-        output.append(pending)
+        output.append("***")
     if output:
         yield "".join(output)
 
@@ -163,11 +170,13 @@ def _post_json(url: str, payload: Dict, timeout: int, api_key: str = "") -> Dict
         except requests.RequestException as exc:
             raise LLMError(_safe_error("无法连接模型服务（%s）：%s" % (url, exc), api_key))
         if resp.status_code != 200:
-            raise LLMError(_safe_error("模型服务返回 HTTP %s：%s" % (resp.status_code, resp.text[:200]), api_key))
+            raise LLMError(_safe_error("模型服务返回 HTTP %s：%s" % (resp.status_code, resp.text),
+                                       api_key, max_chars=200))
         try:
             return resp.json()
         except ValueError:
-            raise LLMError(_safe_error("模型服务返回的不是合法 JSON：%s" % resp.text[:200], api_key))
+            raise LLMError(_safe_error("模型服务返回的不是合法 JSON：%s" % resp.text,
+                                       api_key, max_chars=200))
 
     # ---- 标准库回退实现 ----
     req = urllib.request.Request(url, data=body, headers=headers, method="POST")
@@ -175,14 +184,16 @@ def _post_json(url: str, payload: Dict, timeout: int, api_key: str = "") -> Dict
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             raw = resp.read().decode("utf-8", "replace")
     except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", "replace")[:200]
-        raise LLMError(_safe_error("模型服务返回 HTTP %s：%s" % (exc.code, detail), api_key))
+        detail = exc.read().decode("utf-8", "replace")
+        raise LLMError(_safe_error("模型服务返回 HTTP %s：%s" % (exc.code, detail),
+                                   api_key, max_chars=200))
     except Exception as exc:  # 连接被拒绝、超时等
         raise LLMError(_safe_error("无法连接模型服务（%s）：%s" % (url, exc), api_key))
     try:
         return json.loads(raw)
     except ValueError:
-        raise LLMError(_safe_error("模型服务返回的不是合法 JSON：%s" % raw[:200], api_key))
+        raise LLMError(_safe_error("模型服务返回的不是合法 JSON：%s" % raw,
+                                   api_key, max_chars=200))
 
 
 def _iter_sse_payloads(lines):
@@ -211,7 +222,7 @@ def _iter_sse_payloads(lines):
             yield line
 
 
-def _load_object(payload: str):
+def _load_object(payload: str, api_key: str = ""):
     """解析一个 data 段，返回 dict（非法分片返回 None，服务端报错抛 LLMError）。"""
     try:
         obj = json.loads(payload)
@@ -220,7 +231,8 @@ def _load_object(payload: str):
     if not isinstance(obj, dict):
         return None
     if obj.get("error"):
-        raise LLMError("模型服务返回错误：%s" % str(obj["error"])[:200])
+        raise LLMError(_safe_error("模型服务返回错误：%s" % str(obj["error"]),
+                                   api_key, max_chars=200))
     return obj
 
 
@@ -445,7 +457,8 @@ class LLM:
 
         choices = data.get("choices") or []
         if not choices:
-            raise LLMError(_safe_error("模型没有返回 choices 字段：%s" % str(data)[:200], self.api_key))
+            raise LLMError(_safe_error("模型没有返回 choices 字段：%s" % str(data),
+                                       self.api_key, max_chars=200))
 
         first = choices[0] or {}
         message = first.get("message") or {}
@@ -463,7 +476,7 @@ class LLM:
         def deltas():
             for data in self._stream_payloads(payload):
                 try:
-                    obj = _load_object(data)
+                    obj = _load_object(data, api_key=self.api_key)
                 except LLMError as exc:
                     raise LLMError(_safe_error(exc, self.api_key))
                 self._record_meta(obj)
@@ -485,7 +498,8 @@ class LLM:
                 raise LLMError(_safe_error("无法连接模型服务（%s）：%s" % (url, exc), self.api_key))
             with resp:  # 确保连接一定被释放
                 if resp.status_code != 200:
-                    raise LLMError(_safe_error("模型服务返回 HTTP %s：%s" % (resp.status_code, resp.text[:200]), self.api_key))
+                    raise LLMError(_safe_error("模型服务返回 HTTP %s：%s" % (resp.status_code, resp.text),
+                                               self.api_key, max_chars=200))
                 try:
                     for data in _iter_sse_payloads(resp.iter_lines(decode_unicode=False)):
                         yield data
@@ -502,8 +516,9 @@ class LLM:
         try:
             resp = urllib.request.urlopen(req, timeout=self.timeout)
         except urllib.error.HTTPError as exc:
-            detail = exc.read().decode("utf-8", "replace")[:200]
-            raise LLMError(_safe_error("模型服务返回 HTTP %s：%s" % (exc.code, detail), self.api_key))
+            detail = exc.read().decode("utf-8", "replace")
+            raise LLMError(_safe_error("模型服务返回 HTTP %s：%s" % (exc.code, detail),
+                                       self.api_key, max_chars=200))
         except Exception as exc:
             raise LLMError(_safe_error("无法连接模型服务（%s）：%s" % (url, exc), self.api_key))
         with resp:
