@@ -25,5 +25,9 @@ does not enable this profile and retains the normal `v0.27` tool settings.
   The token and workspace path never go to the platform registry.
 
 See `config.workspace.example.yaml` for a generic configuration example.
+For an authenticated OpenAI-compatible model, set `llm.api_key_file` to a
+current-user-owned file with mode `600` or `400`, or set the
+`MOBILE_AGENT_LLM_API_KEY_FILE` environment variable to that file's path; keep
+the key itself out of configuration files.
 The local controller should call the gateway root URL (for example,
 `http://127.0.0.1:8787`) rather than the underlying model server's `/v1` URL.

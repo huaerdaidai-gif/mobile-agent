@@ -6,7 +6,8 @@ llama.cpp / ollama / vLLM 等只要提供 /v1/chat/completions 都能用。
 
 import time
 
-from llm import LLM, LLMError, detect_server_capabilities, detect_server_context
+from llm import (LLM, LLMError, detect_server_capabilities, detect_server_context,
+                 load_api_key_file)
 from model.provider import (STATE_ERROR, STATE_READY, STATE_UNAVAILABLE, ModelInfo,
                             ModelProvider)
 
@@ -20,15 +21,16 @@ class OpenAICompatibleProvider(ModelProvider):
 
     def __init__(self, base_url: str, name: str = "", temperature: float = 0.2,
                  timeout: int = 300, max_output_tokens: int = 512,
-                 role: str = "primary", kind: str = "text"):
+                 role: str = "primary", kind: str = "text", api_key: str = ""):
         self.base_url = (base_url or "").rstrip("/")
         self.model_name = name
         self.max_output_tokens = int(max_output_tokens or 0)
         self.role = role
         self.kind = kind
+        self.api_key = api_key
         # 复用现有 LLM：Agent 直接使用这个实例，流式/超时/timings 行为与 v0.25.1 完全一致
         self.llm = LLM(base_url=self.base_url, model=name, temperature=temperature,
-                       timeout=timeout, max_tokens=self.max_output_tokens)
+                       timeout=timeout, api_key=api_key, max_tokens=self.max_output_tokens)
         self._context = None
         self._state = STATE_UNAVAILABLE
         self._detail = "尚未探测"
@@ -67,7 +69,7 @@ class OpenAICompatibleProvider(ModelProvider):
 
     def detect_context(self) -> dict:
         """探测服务器上下文（GET /v1/models → GET /props），并缓存。"""
-        info = detect_server_context(self.base_url, timeout=5)
+        info = detect_server_context(self.base_url, timeout=5, api_key=self.api_key)
         self._context = info.get("context")
         if self._context:
             self._state = STATE_READY
@@ -79,7 +81,7 @@ class OpenAICompatibleProvider(ModelProvider):
 
     def probe(self) -> dict:
         """真实能力探测：llama.cpp /props 的 modalities + 上下文。"""
-        info = detect_server_capabilities(self.base_url, timeout=5)
+        info = detect_server_capabilities(self.base_url, timeout=5, api_key=self.api_key)
         if info.get("context"):
             self._context = info["context"]
         if info.get("vision") is not None:
@@ -137,4 +139,5 @@ def build_provider(config: dict) -> OpenAICompatibleProvider:
         temperature=settings["temperature"],
         timeout=settings["timeout"],
         max_output_tokens=settings["max_output_tokens"],
+        api_key=load_api_key_file(settings.get("api_key_file", "")),
     )

@@ -14,7 +14,8 @@ import os
 import sys
 
 from agent import MEMORY_PATH, Agent
-from llm import LLM, LLMError, detect_server_context, http_client_name
+from llm import (LLM, LLMError, detect_server_context, http_client_name,
+                 load_api_key_file)
 
 try:  # Termux 检测是可选能力，导入失败也不影响运行
     from platform import has_termux_api, is_termux
@@ -41,6 +42,7 @@ DEFAULT_CONFIG = {
         "model": "qwen2.5-3b-instruct-q4_k_m.gguf",
         "temperature": 0.2,
         "timeout": 300,
+        "api_key_file": "",
     },
     "agent": {
         "max_context": 4096,
@@ -168,6 +170,8 @@ def build_agent(config: dict, llm=None, server_info: dict = None, verbose: bool 
     extra_agent_kwargs：Gateway 注入模型路由器 / 默认城市等（保持向后兼容）。
     """
     llm_config = config["llm"]
+    if llm_config.get("api_key"):
+        raise ValueError("llm.api_key is unsupported; configure llm.api_key_file instead")
     agent_config = config["agent"]
     memory_config = config.get("memory") or {}
     tools_config = config.get("tools") or {}
@@ -175,12 +179,18 @@ def build_agent(config: dict, llm=None, server_info: dict = None, verbose: bool 
     audio_config = (config.get("models") or {}).get("audio") or {}
 
     max_tokens = int(perf.get("max_output_tokens", 512) or 0)
+    # Environment override keeps the secret itself out of YAML. The configured
+    # value is a path only; load_api_key_file enforces ownership and mode.
+    api_key_file = (os.environ.get("MOBILE_AGENT_LLM_API_KEY_FILE")
+                    or llm_config.get("api_key_file") or "")
+    api_key = load_api_key_file(api_key_file) if llm is None or server_info is None else ""
 
     # 1. 探测服务器真实上下文（GET /v1/models → GET /props）
     if server_info is None:
         server_info = {"context": None, "model": None, "source": None, "error": None}
         if bool(perf.get("auto_detect_context", True)):
-            server_info = detect_server_context(llm_config["base_url"], timeout=5)
+            server_info = detect_server_context(llm_config["base_url"], timeout=5,
+                                                api_key=api_key)
 
     if llm is None:
         llm = LLM(
@@ -188,6 +198,7 @@ def build_agent(config: dict, llm=None, server_info: dict = None, verbose: bool 
             model=llm_config["model"],
             temperature=float(llm_config["temperature"]),
             timeout=int(llm_config["timeout"]),
+            api_key=api_key,
             max_tokens=max_tokens,
         )
 

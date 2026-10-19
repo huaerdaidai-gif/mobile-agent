@@ -3,6 +3,9 @@
 llm:
   # Replace with this phone's local MiniCPM5 OpenAI-compatible endpoint.
   base_url: http://127.0.0.1:8080/v1
+  # Optional: path to a current-user-owned key file with mode 600 or 400.
+  # MOBILE_AGENT_LLM_API_KEY_FILE may provide this path instead.
+  api_key_file: ${MOBILE_AGENT_LLM_API_KEY_FILE}
 
 gateway:
   host: 127.0.0.1

@@ -13,6 +13,7 @@ stream: true
 
 llm:
   base_url: http://127.0.0.1:9999/v1
+  api_key_file: ${MA_TEST_LLM_KEY_FILE}
   model: file-model
   temperature: 0.3
   timeout: 60
@@ -74,6 +75,22 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(settings["timeout"], 60)
         self.assertEqual(settings["max_output_tokens"], 512)
 
+    def test_model_settings_accepts_environment_key_file_path(self):
+        os.environ["MA_TEST_LLM_KEY_FILE"] = "/private/model-key"
+        try:
+            config = runtime_config.load(self.path)
+            self.assertEqual(runtime_config.model_settings(config)["api_key_file"],
+                             "/private/model-key")
+        finally:
+            os.environ.pop("MA_TEST_LLM_KEY_FILE", None)
+
+    def test_plain_model_api_key_setting_is_rejected_without_echoing_value(self):
+        config = runtime_config.load(self.path)
+        config["llm"]["api_key"] = "never-print-this-secret"
+        with self.assertRaisesRegex(ValueError, "llm.api_key is unsupported") as caught:
+            runtime_config.model_settings(config)
+        self.assertNotIn("never-print-this-secret", str(caught.exception))
+
     def test_warnings_detect_missing_token(self):
         os.environ.pop("MA_TEST_TOKEN", None)
         os.environ.pop("MA_TEST_QQ_TOKEN", None)
@@ -104,6 +121,7 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual("${MOBILE_AGENT_ALLOWED_WORKSPACE_ROOT}",
                          config["workspace"]["allowed_root"])
         self.assertEqual("${MOBILE_AGENT_GATEWAY_TOKEN}", config["gateway"]["token"])
+        self.assertEqual("${MOBILE_AGENT_LLM_API_KEY_FILE}", config["llm"]["api_key_file"])
 
 
 if __name__ == "__main__":

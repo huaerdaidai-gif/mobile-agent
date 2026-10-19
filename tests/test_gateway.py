@@ -2,6 +2,7 @@
 """Gateway 测试：/health、/api/chat、流式、认证、admin 拦截、QQ 事件入口。"""
 
 import json
+import os
 import tempfile
 import time
 import unittest
@@ -126,6 +127,35 @@ class GatewayTest(unittest.TestCase):
             "read_files": True, "write_files": False, "shell": False, "network": False,
         })
         self.assertNotIn("allowed_root", payload)
+
+    def test_model_key_file_secret_is_absent_from_health_and_agent_card(self):
+        key_path = os.path.join(self.tmpdir, "model-key")
+        with open(key_path, "w", encoding="utf-8") as handle:
+            handle.write("gateway-model-secret")
+        os.chmod(key_path, 0o600)
+        base = self.start_gateway(
+            llm={"api_key_file": key_path},
+            gateway={"auth": "token", "token": "gateway-token"},
+            workspace={"enabled": True, "allowed_root": self.tmpdir},
+        )
+        for endpoint, headers in (
+                ("/health", {}),
+                ("/api/agent-card", {"Authorization": "Bearer gateway-token"})):
+            status, payload = http(base + endpoint, headers=headers)
+            self.assertIn(status, (200, 503), payload)
+            self.assertNotIn("gateway-model-secret", json.dumps(payload))
+        headers = {"Authorization": "Bearer gateway-token"}
+        body = {"text": "hello", "session_id": "secret-check",
+                "project_id": "secret-check", "project_root": self.tmpdir}
+        self.model.reply = "gateway-model-secret"
+        status, payload = http(base + "/api/chat", body, headers=headers)
+        self.assertEqual(status, 200, payload)
+        self.assertNotIn("gateway-model-secret", json.dumps(payload))
+        self.model.fail = True
+        self.model.error_message = "upstream echoed gateway-model-secret"
+        status, payload = http(base + "/api/chat", body, headers=headers)
+        self.assertEqual(status, 502, payload)
+        self.assertNotIn("gateway-model-secret", json.dumps(payload))
 
     def test_agent_card_is_not_available_in_default_profile(self):
         base = self.start_gateway()

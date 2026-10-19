@@ -143,6 +143,8 @@ def get(config: dict, path: str, default=None):
 def model_settings(config: dict) -> dict:
     """模型相关设置：model.* 优先，缺省回落到 llm.*（v0.25.1 的配置）。"""
     llm = config.get("llm") or {}
+    if llm.get("api_key"):
+        raise ValueError("llm.api_key is unsupported; configure llm.api_key_file instead")
     perf = config.get("performance") or {}
     return {
         "provider": get(config, "model.provider", "openai-compatible"),
@@ -151,6 +153,8 @@ def model_settings(config: dict) -> dict:
         "temperature": float(llm.get("temperature", 0.2)),
         "timeout": int(llm.get("timeout", 300)),
         "max_output_tokens": int(perf.get("max_output_tokens", 512) or 0),
+        "api_key_file": (os.environ.get("MOBILE_AGENT_LLM_API_KEY_FILE")
+                         or llm.get("api_key_file", "")),
     }
 
 

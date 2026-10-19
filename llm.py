@@ -19,6 +19,11 @@ v0.25.1 新增：
 """
 
 import json
+import errno
+import os
+import stat
+import urllib.error
+import urllib.request
 from typing import Dict, List
 
 # SSE 协议相关常量
@@ -30,9 +35,6 @@ try:  # 优先使用 requests
 
     _HAS_REQUESTS = True
 except ImportError:  # 未安装 requests 时回退到标准库
-    import urllib.error
-    import urllib.request
-
     _HAS_REQUESTS = False
 
 
@@ -40,27 +42,132 @@ class LLMError(Exception):
     """LLM 调用失败（网络不通、超时、返回格式异常等）。"""
 
 
+def load_api_key_file(path: str = "") -> str:
+    """Load a private, current-user-owned API key file without logging its value."""
+    value = str(path or "").strip()
+    if not value:
+        return ""
+    value = os.path.expanduser(os.path.expandvars(value))
+    if value.startswith("${") and value.endswith("}"):
+        variable = value[2:-1].split(":-", 1)[0]
+        if variable == "MOBILE_AGENT_LLM_API_KEY_FILE" and not os.environ.get(variable):
+            return ""
+        raise ValueError("llm.api_key_file environment variable is not set: %s" % variable)
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(value, flags)
+    except OSError as exc:
+        if getattr(exc, "errno", None) == errno.ELOOP:
+            raise ValueError("llm.api_key_file must not be a symbolic link")
+        raise ValueError("llm.api_key_file cannot be opened")
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode):
+            raise ValueError("llm.api_key_file must be a regular file")
+        if not hasattr(os, "getuid") or info.st_uid != os.getuid():
+            raise ValueError("llm.api_key_file must be owned by the current user")
+        if stat.S_IMODE(info.st_mode) not in (0o400, 0o600):
+            raise ValueError("llm.api_key_file permissions must be 400 or 600")
+        chunks = []
+        remaining = 8193
+        while remaining:
+            chunk = os.read(descriptor, min(remaining, 4096))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        raw = b"".join(chunks)
+        if len(raw) > 8192:
+            raise ValueError("llm.api_key_file is too large")
+        try:
+            return raw.decode("utf-8").strip()
+        except UnicodeDecodeError:
+            raise ValueError("llm.api_key_file must contain UTF-8 text")
+    finally:
+        os.close(descriptor)
+
+
+def _safe_error(value, api_key: str = "") -> str:
+    """Prevent a server or transport error from reflecting the configured key."""
+    text = str(value)
+    key = str(api_key or "")
+    return text.replace(key, "***") if key else text
+
+
+def _redact_value(value, api_key: str = ""):
+    """Remove a reflected secret from nested provider metadata before exposing it."""
+    if isinstance(value, str):
+        return _safe_error(value, api_key)
+    if isinstance(value, dict):
+        return {_safe_error(key, api_key) if isinstance(key, str) else key:
+                _redact_value(item, api_key) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_redact_value(item, api_key) for item in value]
+    return value
+
+
+def _redact_stream(chunks, api_key: str):
+    """Redact a key even when it is split across streamed response chunks."""
+    key = str(api_key or "")
+    if not key:
+        yield from chunks
+        return
+    pending = ""
+    output = []
+    output_size = 0
+    for chunk in chunks:
+        pending += str(chunk)
+        while pending:
+            if pending.startswith(key):
+                output.append("***")
+                output_size += 3
+                pending = pending[len(key):]
+            elif key.startswith(pending):
+                break
+            else:
+                output.append(pending[0])
+                output_size += 1
+                pending = pending[1:]
+            if output_size >= 64:
+                yield "".join(output)
+                output = []
+                output_size = 0
+    if pending:
+        output.append(pending)
+    if output:
+        yield "".join(output)
+
+
+def _auth_headers(api_key: str = "", accept: str = None) -> dict:
+    headers = {"Content-Type": "application/json"}
+    if accept:
+        headers["Accept"] = accept
+    if api_key:
+        headers["Authorization"] = "Bearer " + api_key
+    return headers
+
+
 def http_client_name() -> str:
     """返回当前实际使用的 HTTP 客户端名称，用于启动时提示。"""
     return "requests" if _HAS_REQUESTS else "urllib（标准库回退）"
 
 
-def _post_json(url: str, payload: Dict, timeout: int) -> Dict:
+def _post_json(url: str, payload: Dict, timeout: int, api_key: str = "") -> Dict:
     """发送 POST 请求并返回解析后的 JSON，失败时抛出 LLMError。"""
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-    headers = {"Content-Type": "application/json"}
+    headers = _auth_headers(api_key)
 
     if _HAS_REQUESTS:
         try:
             resp = requests.post(url, data=body, headers=headers, timeout=timeout)
         except requests.RequestException as exc:
-            raise LLMError("无法连接模型服务（%s）：%s" % (url, exc))
+            raise LLMError(_safe_error("无法连接模型服务（%s）：%s" % (url, exc), api_key))
         if resp.status_code != 200:
-            raise LLMError("模型服务返回 HTTP %s：%s" % (resp.status_code, resp.text[:200]))
+            raise LLMError(_safe_error("模型服务返回 HTTP %s：%s" % (resp.status_code, resp.text[:200]), api_key))
         try:
             return resp.json()
         except ValueError:
-            raise LLMError("模型服务返回的不是合法 JSON：%s" % resp.text[:200])
+            raise LLMError(_safe_error("模型服务返回的不是合法 JSON：%s" % resp.text[:200], api_key))
 
     # ---- 标准库回退实现 ----
     req = urllib.request.Request(url, data=body, headers=headers, method="POST")
@@ -69,13 +176,13 @@ def _post_json(url: str, payload: Dict, timeout: int) -> Dict:
             raw = resp.read().decode("utf-8", "replace")
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", "replace")[:200]
-        raise LLMError("模型服务返回 HTTP %s：%s" % (exc.code, detail))
+        raise LLMError(_safe_error("模型服务返回 HTTP %s：%s" % (exc.code, detail), api_key))
     except Exception as exc:  # 连接被拒绝、超时等
-        raise LLMError("无法连接模型服务（%s）：%s" % (url, exc))
+        raise LLMError(_safe_error("无法连接模型服务（%s）：%s" % (url, exc), api_key))
     try:
         return json.loads(raw)
     except ValueError:
-        raise LLMError("模型服务返回的不是合法 JSON：%s" % raw[:200])
+        raise LLMError(_safe_error("模型服务返回的不是合法 JSON：%s" % raw[:200], api_key))
 
 
 def _iter_sse_payloads(lines):
@@ -134,14 +241,16 @@ def _delta_from(obj) -> str:
     return first.get("text") or ""
 
 
-def _get_json(url: str, timeout: int):
+def _get_json(url: str, timeout: int, api_key: str = ""):
     """GET 一个 JSON 接口，返回 (数据, 错误信息)；从不抛异常。"""
     headers = {"Accept": "application/json"}
+    if api_key:
+        headers["Authorization"] = "Bearer " + api_key
     if _HAS_REQUESTS:
         try:
             resp = requests.get(url, headers=headers, timeout=timeout)
         except requests.RequestException as exc:
-            return None, str(exc)
+            return None, _safe_error(exc, api_key)
         if resp.status_code != 200:
             return None, "HTTP %s" % resp.status_code
         try:
@@ -155,7 +264,7 @@ def _get_json(url: str, timeout: int):
     except urllib.error.HTTPError as exc:
         return None, "HTTP %s" % exc.code
     except Exception as exc:
-        return None, str(exc)
+        return None, _safe_error(exc, api_key)
     try:
         return json.loads(raw), None
     except ValueError:
@@ -196,7 +305,7 @@ _PROPS_CONTEXT_PATHS = (
 )
 
 
-def detect_server_context(base_url: str, timeout: int = 5) -> Dict:
+def detect_server_context(base_url: str, timeout: int = 5, api_key: str = "") -> Dict:
     """探测模型服务真实可用的上下文长度。
 
     返回 {"context": int|None, "model": str|None, "source": str|None, "error": str|None}。
@@ -211,12 +320,14 @@ def detect_server_context(base_url: str, timeout: int = 5) -> Dict:
         info["error"] = "未配置 base_url"
         return info
 
-    data, error = _get_json(base + "/models", timeout)
+    data, error = _get_json(base + "/models", timeout, api_key=api_key)
     if isinstance(data, dict):
         items = data.get("data") or data.get("models") or []
         if isinstance(items, list) and items and isinstance(items[0], dict):
             first = items[0]
             info["model"] = first.get("id") or first.get("name") or first.get("model")
+            if info["model"] is not None:
+                info["model"] = _safe_error(info["model"], api_key)
             info["context"] = _pick_int(first, _MODELS_CONTEXT_PATHS)
             if info["context"]:
                 info["source"] = "GET /v1/models"
@@ -225,7 +336,7 @@ def detect_server_context(base_url: str, timeout: int = 5) -> Dict:
 
     if info["context"] is None:
         root = base[:-3] if base.endswith("/v1") else base
-        props, props_error = _get_json(root + "/props", timeout)
+        props, props_error = _get_json(root + "/props", timeout, api_key=api_key)
         if isinstance(props, dict):
             context = _pick_int(props, _PROPS_CONTEXT_PATHS)
             if context:
@@ -233,12 +344,14 @@ def detect_server_context(base_url: str, timeout: int = 5) -> Dict:
                 info["source"] = "GET /props"
             if not info["model"]:
                 info["model"] = props.get("model_alias") or props.get("model_path")
+                if info["model"] is not None:
+                    info["model"] = _safe_error(info["model"], api_key)
         elif props_error and not info["error"]:
             info["error"] = props_error
     return info
 
 
-def detect_server_capabilities(base_url: str, timeout: int = 5) -> Dict:
+def detect_server_capabilities(base_url: str, timeout: int = 5, api_key: str = "") -> Dict:
     """探测服务端真实能力（llama.cpp /props）。
 
     返回 {"context": int|None, "vision": bool|None, "audio": bool|None,
@@ -254,7 +367,7 @@ def detect_server_capabilities(base_url: str, timeout: int = 5) -> Dict:
         info["error"] = "未配置 base_url"
         return info
     root = base[:-3] if base.endswith("/v1") else base
-    data, error = _get_json(root + "/props", timeout)
+    data, error = _get_json(root + "/props", timeout, api_key=api_key)
     if not isinstance(data, dict):
         info["error"] = error or "无法读取 /props"
         return info
@@ -277,14 +390,14 @@ class LLM:
         model: str = "qwen2.5-3b-instruct-q4_k_m.gguf",
         temperature: float = 0.2,
         timeout: int = 120,
-        api_key: str = "local",
+        api_key: str = "",
         max_tokens: int = 0,
     ):
         self.base_url = (base_url or "").rstrip("/")
         self.model = model
         self.temperature = temperature
         self.timeout = timeout
-        self.api_key = api_key  # 本地 llama.cpp 不校验，占位即可
+        self.api_key = str(api_key or "")
         self.max_tokens = int(max_tokens or 0)  # 0 表示不限，交给服务端默认值
         # 服务端返回的性能信息（只用于观测，不参与对话逻辑）
         self.last_timings: Dict = {}
@@ -318,28 +431,28 @@ class LLM:
             return
         timings = obj.get("timings")
         if isinstance(timings, dict):
-            self.last_timings = timings
+            self.last_timings = _redact_value(timings, self.api_key)
         usage = obj.get("usage")
         if isinstance(usage, dict):
-            self.last_usage = usage
+            self.last_usage = _redact_value(usage, self.api_key)
 
     def chat(self, messages: List[Dict[str, str]], response_format: Dict = None) -> str:
         """发送对话消息，返回模型回复的纯文本。"""
         data = _post_json(self.endpoint,
                           self._payload(messages, stream=False, response_format=response_format),
-                          self.timeout)
+                          self.timeout, api_key=self.api_key)
         self._record_meta(data)
 
         choices = data.get("choices") or []
         if not choices:
-            raise LLMError("模型没有返回 choices 字段：%s" % str(data)[:200])
+            raise LLMError(_safe_error("模型没有返回 choices 字段：%s" % str(data)[:200], self.api_key))
 
         first = choices[0] or {}
         message = first.get("message") or {}
         content = message.get("content")
         if content is None:  # 兼容极少数返回 text 字段的实现
             content = first.get("text", "")
-        return (content or "").strip()
+        return _safe_error((content or "").strip(), self.api_key)
 
     def chat_stream(self, messages: List[Dict[str, str]], response_format: Dict = None):
         """以流式方式生成回答，逐段 yield 文本增量。
@@ -347,36 +460,41 @@ class LLM:
         调用方负责拼接；中途断开时会抛出 LLMError，已经 yield 出去的内容由调用方保留。
         """
         payload = self._payload(messages, stream=True, response_format=response_format)
-        for data in self._stream_payloads(payload):
-            obj = _load_object(data)
-            self._record_meta(obj)
-            delta = _delta_from(obj)
-            if delta:
-                yield delta
+        def deltas():
+            for data in self._stream_payloads(payload):
+                try:
+                    obj = _load_object(data)
+                except LLMError as exc:
+                    raise LLMError(_safe_error(exc, self.api_key))
+                self._record_meta(obj)
+                delta = _delta_from(obj)
+                if delta:
+                    yield delta
+        yield from _redact_stream(deltas(), self.api_key)
 
     def _stream_payloads(self, payload: Dict):
         """发起流式请求并产出 SSE 的 data 段（requests 与标准库两条实现）。"""
         url = self.endpoint
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        headers = {"Content-Type": "application/json", "Accept": "text/event-stream"}
+        headers = _auth_headers(self.api_key, "text/event-stream")
 
         if _HAS_REQUESTS:
             try:
                 resp = requests.post(url, data=body, headers=headers, timeout=self.timeout, stream=True)
             except requests.RequestException as exc:
-                raise LLMError("无法连接模型服务（%s）：%s" % (url, exc))
+                raise LLMError(_safe_error("无法连接模型服务（%s）：%s" % (url, exc), self.api_key))
             with resp:  # 确保连接一定被释放
                 if resp.status_code != 200:
-                    raise LLMError("模型服务返回 HTTP %s：%s" % (resp.status_code, resp.text[:200]))
+                    raise LLMError(_safe_error("模型服务返回 HTTP %s：%s" % (resp.status_code, resp.text[:200]), self.api_key))
                 try:
                     for data in _iter_sse_payloads(resp.iter_lines(decode_unicode=False)):
                         yield data
                 except LLMError:
                     raise
                 except requests.RequestException as exc:  # 中途断流
-                    raise LLMError("流式响应中断：%s" % exc)
+                    raise LLMError(_safe_error("流式响应中断：%s" % exc, self.api_key))
                 except Exception as exc:
-                    raise LLMError("流式响应读取失败：%s" % exc)
+                    raise LLMError(_safe_error("流式响应读取失败：%s" % exc, self.api_key))
             return
 
         # ---- 标准库回退：urlopen 的返回对象可迭代，同样可以逐行流式读取 ----
@@ -385,9 +503,9 @@ class LLM:
             resp = urllib.request.urlopen(req, timeout=self.timeout)
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", "replace")[:200]
-            raise LLMError("模型服务返回 HTTP %s：%s" % (exc.code, detail))
+            raise LLMError(_safe_error("模型服务返回 HTTP %s：%s" % (exc.code, detail), self.api_key))
         except Exception as exc:
-            raise LLMError("无法连接模型服务（%s）：%s" % (url, exc))
+            raise LLMError(_safe_error("无法连接模型服务（%s）：%s" % (url, exc), self.api_key))
         with resp:
             try:
                 for data in _iter_sse_payloads(resp):
@@ -395,4 +513,4 @@ class LLM:
             except LLMError:
                 raise
             except Exception as exc:  # 超时、连接被重置、响应不完整等
-                raise LLMError("流式响应中断：%s" % exc)
+                raise LLMError(_safe_error("流式响应中断：%s" % exc, self.api_key))

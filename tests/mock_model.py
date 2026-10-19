@@ -23,16 +23,17 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         server = self.server
+        server.request_headers.append((self.path, self.headers.get("Authorization")))
         if self.path.startswith("/v1/models"):
             if server.fail:
-                self._json(500, {"error": {"message": "mock failure"}})
+                self._json(500, {"error": {"message": server.error_message or "mock failure"}})
                 return
             self._json(200, {"object": "list", "data": [
                 {"id": server.model_name, "object": "model",
                  "meta": {"n_ctx": server.context, "n_ctx_train": 32768}}]})
         elif self.path.startswith("/props"):
             if server.fail:
-                self._json(500, {"error": {"message": "mock failure"}})
+                self._json(500, {"error": {"message": server.error_message or "mock failure"}})
                 return
             self._json(200, {"default_generation_settings": {"n_ctx": server.context},
                              "modalities": server.modalities, "build_info": "mock-b1"})
@@ -41,6 +42,7 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         server = self.server
+        server.request_headers.append((self.path, self.headers.get("Authorization")))
         length = int(self.headers.get("Content-Length") or 0)
         try:
             body = json.loads(self.rfile.read(length) or b"{}")
@@ -49,7 +51,7 @@ class _Handler(BaseHTTPRequestHandler):
             return
         server.calls.append(body)
         if server.fail:
-            self._json(500, {"error": {"message": "mock failure"}})
+            self._json(500, {"error": {"message": server.error_message or "mock failure"}})
             return
         content = server.reply_for(body)
         if body.get("stream"):
@@ -109,9 +111,11 @@ class MockModelServer(ThreadingHTTPServer):
         self.tool_call_rules = dict(tool_call_rules or {})
         self.echo_tool_result = echo_tool_result
         self.fail = fail
+        self.error_message = ""
         self.delay = delay
         self.model_name = model_name
         self.calls = []
+        self.request_headers = []
         self._thread = None
 
     # ---- 生命周期 ----
