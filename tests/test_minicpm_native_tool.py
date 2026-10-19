@@ -77,6 +77,32 @@ class MiniCPMNativeToolTest(unittest.TestCase):
         self.assertEqual(chunks_seen, ["普通回答"])
         self.assertIn("流式响应中断", answer)
 
+    def test_stream_gate_discards_xml_started_before_any_plain_text_on_interrupt(self):
+        prefixes = (
+            '<function name="file"><param name="action">read</param>'
+            '<param name="path">README',
+            '<think>准备读取</think><function name="file">',
+            '<func',
+        )
+        for prefix in prefixes:
+            with self.subTest(prefix=prefix):
+                agent = self.make_agent(["unused"])
+                streamed = []
+
+                def interrupted_stream(messages, form):
+                    yield prefix
+                    raise __import__("llm").LLMError("synthetic interrupted")
+
+                with patch.object(agent, "_stream_with_fallback", side_effect=interrupted_stream), \
+                     patch.object(agent, "_run_tool") as run:
+                    answer = agent.ask("请读取 README.md", on_text=streamed.append)
+                self.assertEqual([], streamed)
+                self.assertNotIn("<function", answer)
+                self.assertNotIn("<func", answer)
+                self.assertNotIn("<think", answer)
+                self.assertIn("流式响应中断", answer)
+                run.assert_not_called()
+
     def test_unknown_tool_and_parameters_are_not_accepted_for_execution(self):
         unknown_tool = '<function name="erase_everything"><param name="path">x</param></function>'
         unknown_param = ('<function name="time"><param name="path">x</param>'

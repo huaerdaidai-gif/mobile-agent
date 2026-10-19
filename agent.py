@@ -283,6 +283,10 @@ class _StreamGate:
                 self.emit(safe)
             return
         self.buffer += delta
+        lowered = self.buffer.lower()
+        if ("<function" in lowered or "<think" in lowered
+                or self._xml_prefix_tail(self.buffer)):
+            self.quarantined = True
         if not any(ch in self.buffer for ch in SUSPICIOUS_CHARS):
             self.printing = True
             if self.emit:
