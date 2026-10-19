@@ -44,6 +44,39 @@ class MiniCPMNativeToolTest(unittest.TestCase):
                                      "arguments": {"action": "read", "path": "README.md"}})
         self.assertNotIn("<function", "".join(streamed))
 
+    def test_stream_gate_quarantines_xml_after_prose_across_character_chunks(self):
+        prose = "我先检查一下。"
+        call = ('<think>读取文件</think><function name="file">'
+                '<param name="action">read</param><param name="path">README.md</param>'
+                '</function>')
+        agent = self.make_agent(["unused"])
+        chunks = [prose, *list(call)]
+        with patch.object(agent, "_stream_with_fallback", side_effect=[iter(chunks),
+                                                                         iter(["文件内容已读取。"])]), \
+             patch.object(agent, "_run_tool", return_value={"ok": True, "result": "内容"}) as run:
+            streamed = []
+            self.assertEqual(agent.ask("请读取 README.md", on_text=streamed.append), "文件内容已读取。")
+        visible = "".join(streamed)
+        self.assertIn(prose, visible)
+        self.assertIn("文件内容已读取。", visible)
+        self.assertNotIn("<think", visible)
+        self.assertNotIn("<function", visible)
+        self.assertNotIn("<param", visible)
+        run.assert_called_once()
+
+    def test_stream_gate_keeps_ordinary_text_streaming_and_hides_interrupted_xml(self):
+        agent = self.make_agent(["unused"])
+        chunks_seen = []
+        def ordinary_then_interrupt(messages, form):
+            yield "普通回答"
+            yield "<func"
+            raise __import__("llm").LLMError("interrupted")
+
+        with patch.object(agent, "_stream_with_fallback", side_effect=ordinary_then_interrupt):
+            answer = agent.ask("你好", on_text=chunks_seen.append)
+        self.assertEqual(chunks_seen, ["普通回答"])
+        self.assertIn("流式响应中断", answer)
+
     def test_unknown_tool_and_parameters_are_not_accepted_for_execution(self):
         unknown_tool = '<function name="erase_everything"><param name="path">x</param></function>'
         unknown_param = ('<function name="time"><param name="path">x</param>'

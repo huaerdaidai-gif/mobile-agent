@@ -234,7 +234,8 @@ class _StreamGate:
       - 还没出现可疑字符（{、` 或 <）→ 当普通回答，立刻显示；
       - 一旦出现可疑字符 → 先暂存，等这轮生成结束由 Agent 决定丢掉还是补显。
 
-    开关只在「这一轮尚未开始显示」时生效，之后一律直通，不会引入额外延迟。
+    普通文本开始显示后仍检查 XML 函数调用起始标记。发现调用后暂存剩余
+    内容，交由 Agent 解析；确认调用或中断时可整体丢弃，普通文本则补显。
     """
 
     def __init__(self, emit: Optional[Callable[[str], None]] = None):
@@ -242,14 +243,44 @@ class _StreamGate:
         self.buffer = ""
         self.printing = False
         self.finished = False
+        self.quarantined = False
+
+    @staticmethod
+    def _xml_prefix_tail(text: str) -> int:
+        """返回末尾可能是 XML 调用前缀的长度，避免分片边界泄漏标签。"""
+        lowered = text.lower()
+        needles = ("<function", "<think")
+        for size in range(min(len(text), max(map(len, needles))), 0, -1):
+            tail = lowered[-size:]
+            if any(needle.startswith(tail) for needle in needles):
+                return size
+        return 0
 
     def feed(self, delta: str) -> None:
         """吃进一段增量文本。"""
         if self.finished or not delta:
             return
-        if self.printing:  # 已经开始显示，直接透传
-            if self.emit:
-                self.emit(delta)
+        if self.quarantined:
+            self.buffer += delta
+            return
+        if self.printing:
+            combined = self.buffer + delta
+            lowered = combined.lower()
+            starts = [index for needle in ("<function", "<think")
+                      if (index := lowered.find(needle)) >= 0]
+            if starts:
+                start = min(starts)
+                safe = combined[:start]
+                if safe and self.emit:
+                    self.emit(safe)
+                self.buffer = combined[start:]
+                self.quarantined = True
+                return
+            tail_size = self._xml_prefix_tail(combined)
+            safe = combined[:-tail_size] if tail_size else combined
+            self.buffer = combined[-tail_size:] if tail_size else ""
+            if safe and self.emit:
+                self.emit(safe)
             return
         self.buffer += delta
         if not any(ch in self.buffer for ch in SUSPICIOUS_CHARS):
@@ -263,7 +294,7 @@ class _StreamGate:
         if self.finished:
             return
         self.finished = True
-        if not self.printing and self.buffer:
+        if self.buffer:
             self.printing = True
             if self.emit:
                 self.emit(self.buffer)
@@ -485,7 +516,9 @@ class Agent:
                 force_json = False
 
                 # 情况零：流式中断，且已经生成的内容像不完整的工具调用 → 丢掉半截 JSON
-                if interrupted and looks_like_tool_attempt(reply):
+                if interrupted and (looks_like_tool_attempt(reply)
+                                    or gate.quarantined
+                                    or (gate.printing and gate.buffer)):
                     gate.discard()
                     self._status("[流式响应中断，已忽略不完整的工具调用]")
                     return self._finish(user_input, "（流式响应中断，模型输出不完整，请重试）", save=False)
@@ -778,7 +811,8 @@ class Agent:
             reply = "".join(chunks)
             if not reply.strip():
                 raise  # 完全没有内容，交给上层提示错误
-            if looks_like_tool_attempt(reply):
+            if (looks_like_tool_attempt(reply) or gate.quarantined
+                    or (gate.printing and gate.buffer)):
                 return reply, gate, True  # 交给 ask() 判断为「不完整的工具调用」
             gate.flush()
             self._status("[流式响应中断，以上为已生成的部分]")
